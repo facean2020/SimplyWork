@@ -216,7 +216,7 @@ suspend fun run(sessionId, initialPrompt): Flow<AgentStepEvent>   // 冷流，�
 ① UserPrompt 入队 ────────────────▶ 入队即落库 UserPrompt 节点
 ② B Check Message Queue ──────────▶ drainAll()：Steer/FollowUp/UserPrompt 全部出队并逐条落库
 ③ C Inject System Prompt ───────── 会话首轮持久化一条 SystemPrompt(kind=base) 节点（仅一次）
-④ D Inject Skill and Tool ──────── registry.definitions()（sys_* 7 + todo_write）+ SkillInjector 缝（默认空）
+④ D Inject Skill and Tool ──────── registry.definitions()（sys_* 13 + todo_write）+ SkillInjector 缝（默认空）
 ⑤ E Compact Engine ─────────────── 水位检查，超限则压缩（§7）
 ⑥ F Convert format ─────────────── AgentContextAssembler：节点流 → ModelRequest（§8.1）
 ⑦ H Send to LLM ────────────────── withTimeout(llmTimeoutMs=120s) + provider.generate()
@@ -298,11 +298,14 @@ class AgentToolRegistry { fun register(t) / get(name) / definitions() }
 | A3 | dangerLevel ∈ {SAFE, USER_VISIBLE} | **Allow** |
 | A4 | dangerLevel == USER_CONFIRMING | 询问 `AuditApprovalHandler`：approve → Allow；decline → **Deny**("User declined") |
 | A5 | CalendarInsertSpec DIRECT_WRITE | dangerLevel 解析为 USER_CONFIRMING（实例级，覆盖 entry 默认值），走 A4 |
+| A6 | v1.2 读工具执行时发现缺 Android 运行时权限 | **不在审计门禁层**：A3/A4 通过后进入 Router，执行器经 `SystemPermissionRequester` 邀请 UI 弹系统授权框 → **复查权限** → 已授予则同一次调用继续；仍缺则回 `PermissionRequired` 结果（Deny 不抛异常，P2） |
 
 - `AuditApprovalHandler` 是 HITL 缝：v1 默认 `AutoApproveHandler`（审计日志放行），UI 弹窗版后续替换（诚实欠账，见 §12）。
 - **Deny 不抛异常**：生成 `ToolResult(isError=true)` 落库回流模型（P2）。
+- **A4 与 A6 是两条独立的 HITL 通道，不要合并**：A4 问"要不要让助手做这件事"（我们自己的对话框，可配置降级），A6 是 Android 系统权限弹窗（由系统渲染、每权限至多问两次、拒绝后进入永久拒绝态）。A6 挂在执行器一侧，正是因为 P4 规定基础设施只报告、申请归 UI。
+- A6 的挂起同样受 Router 10 s 超时约束：用户不回系统弹窗时退化为 `Timeout`，不会吊死 Agent Loop；`PermissionCoordinator` 在取消时清空挂起态，不留幽灵弹窗。
 
-### 8.3 本轮工具清单（8 个）
+### 8.3 工具清单（v1.2：14 个）
 
 | 工具 | 来源 | dangerLevel |
 |---|---|---|
@@ -310,7 +313,15 @@ class AgentToolRegistry { fun register(t) / get(name) / definitions() }
 | `sys_clipboard_read` | systemops Router | SAFE |
 | `sys_clipboard_write` / `sys_share_text` / `sys_notify_post` | systemops Router | USER_VISIBLE |
 | `sys_calendar_insert` | systemops Router | USER_VISIBLE（DIRECT_WRITE 时实例级升 USER_CONFIRMING） |
+| `sys_time_read` / `sys_time_calc` / `sys_device_read` / `sys_app_list` | systemops Router（v1.2 读侧） | SAFE |
+| `sys_calendar_query` / `sys_location_read` | systemops Router（v1.2 读侧） | USER_CONFIRMING |
 | `todo_write`（builtin） | agent-core，写 StateMemoryStore | SAFE |
+
+**为什么读侧工具必须占两个 dangerLevel 档**：分档依据是**数据归属**而非操作类型。时钟、电量、已安装包名属于设备状态 → `SAFE`；日程内容与实时坐标属于用户私有数据 → `USER_CONFIRMING`，每次调用都过 HITL。副作用是 `sys_calendar_query` 比 `sys_calendar_insert` 的默认模式更严——这不是笔误：EDITOR_INTENT 写入由日历 App 自行确认、从不把既有日程暴露给我们，而查询会把整本日程读进模型上下文。
+
+**v1.2 读侧解决的硬缺口**：模型没有任何时间感（`DEFAULT_SYSTEM_PROMPT` 与 `AgentContextAssembler` 注入链都不含当前时间），而 `sys_calendar_insert` 的入参是 epoch 毫秒——没有 `sys_time_read`，排期只能靠猜，日历写入实际不可用。同理 `sys_app_open` 要求精确包名，没有 `sys_app_list` 就稳定吃到 `target_not_found`。
+
+缺权限时的自愈路径见 §8.2 A6，设计依据在 `appfunction-design.md` v1.2 修订段。
 
 `todo_write` schema：`{"items":[{"title":string,"status":"pending|in_progress|done|cancelled"}]}`（replace-all 语义，id 服务端生成）；无 todo 工具时 CompletionGuard 无从判定闭环，故为必要最小内置件。
 

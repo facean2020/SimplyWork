@@ -15,6 +15,7 @@ import com.yangz3720.simplywork.infrastructure.systemops.intent.SystemIntentExec
 import com.yangz3720.simplywork.ui.agent.AgentRuntimeOwner
 import com.yangz3720.simplywork.ui.agent.ApprovalCoordinator
 import com.yangz3720.simplywork.ui.agent.ModelSelection
+import com.yangz3720.simplywork.ui.agent.PermissionCoordinator
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -39,10 +40,20 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
     /** HITL 审批协调器（Q1）：UI 弹窗决策经此回灌审计门禁。 */
     val approvalCoordinator = ApprovalCoordinator()
 
+    /** 运行时权限协调器（v1.2 / P4）：系统授权结果经此回灌 systemops 执行器。 */
+    val permissionCoordinator = PermissionCoordinator()
+
     /** Shared systemops wiring: router is context-bound, not config-bound. */
     private val router: SystemOperationRouter by lazy {
         val probe = SystemCapabilityProbeImpl.from(appContext)
-        SystemOperationRouterImpl(SystemIntentExecutorImpl(appContext, probe), probe)
+        SystemOperationRouterImpl(
+            SystemIntentExecutorImpl(
+                appContext,
+                probe,
+                permissionRequester = permissionCoordinator.asRequester()
+            ),
+            probe
+        )
     }
 
     @Volatile private var runtime: AgentRuntime? = null

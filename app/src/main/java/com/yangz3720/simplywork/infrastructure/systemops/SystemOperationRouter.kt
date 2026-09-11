@@ -2,15 +2,21 @@ package com.yangz3720.simplywork.infrastructure.systemops
 
 import com.yangz3720.simplywork.infrastructure.error.InfrastructureException
 import com.yangz3720.simplywork.infrastructure.systemops.intent.SystemIntentExecutor
+import com.yangz3720.simplywork.infrastructure.systemops.model.AppListSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.AppOpenSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.CalendarInsertSpec
+import com.yangz3720.simplywork.infrastructure.systemops.model.CalendarQuerySpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.ClipboardReadSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.ClipboardWriteSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.DeepLinkSpec
+import com.yangz3720.simplywork.infrastructure.systemops.model.DeviceReadSpec
+import com.yangz3720.simplywork.infrastructure.systemops.model.LocationReadSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.NotificationPostSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.OperationSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.ShareTextSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.SystemOperationResult
+import com.yangz3720.simplywork.infrastructure.systemops.model.TimeCalcSpec
+import com.yangz3720.simplywork.infrastructure.systemops.model.TimeReadSpec
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.Flow
@@ -82,6 +88,14 @@ class SystemOperationRouterImpl(
         is CalendarInsertSpec -> executor.insertCalendarEvent(spec)
         is NotificationPostSpec -> executor.postNotification(spec)
         is ShareTextSpec -> executor.shareText(spec.title, spec.content)
+        // Exhaustive `when` on the sealed interface: a new OperationSpec is a compile error
+        // here until it is dispatched, which is what keeps the catalog and the router in step.
+        is TimeReadSpec -> executor.readCurrentTime()
+        is TimeCalcSpec -> executor.calculateTime(spec)
+        is DeviceReadSpec -> executor.readDeviceInfo()
+        is AppListSpec -> executor.listInstalledApps(spec)
+        is CalendarQuerySpec -> executor.queryCalendarEvents(spec)
+        is LocationReadSpec -> executor.readLocation(spec)
     }
 
     override fun capabilities(): SystemCapabilities = probe.snapshot()

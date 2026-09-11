@@ -4,7 +4,8 @@
 
     <!-- systemops: notification posting + C4 notification fallback (runtime, C5) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- systemops: calendar DIRECT_WRITE mode only (runtime; EDITOR_INTENT needs none) -->
+    <!-- systemops: calendar DIRECT_WRITE mode + sys_calendar_query (v1.2) (runtime;
+         EDITOR_INTENT insert needs none) -->
     <uses-permission android:name="android.permission.READ_CALENDAR" />
     <uses-permission android:name="android.permission.WRITE_CALENDAR" />
     <!-- systemops: C4 background activity launch exemption when granted via Settings -->
@@ -16,6 +17,17 @@
     <!-- Sideloading distribution: skip per-<queries> package-visibility whack-a-mole for
          resolveActivity / getLaunchIntentForPackage against arbitrary targets. -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <!-- sys_device_read (v1.2): ConnectivityManager.getActiveNetwork / getNetworkCapabilities.
+         Normal permission, granted at install. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- sys_location_read (v1.2): runtime permissions, requested by the UI layer only (P4).
+         APPROXIMATE needs coarse; PRECISE adds fine. -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- Location is a preference, not a hard requirement: sys_location_read degrades to
+         security_blocked when no provider is enabled. -->
+    <uses-feature android:name="android.hardware.location" android:required="false" />
+    <uses-feature android:name="android.hardware.location.gps" android:required="false" />
 
     <application
         android:name=".SimplyWorkApp"

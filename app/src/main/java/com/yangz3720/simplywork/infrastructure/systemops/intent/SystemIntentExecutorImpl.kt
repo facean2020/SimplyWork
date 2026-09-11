@@ -1,6 +1,7 @@
 package com.yangz3720.simplywork.infrastructure.systemops.intent
 
 import android.Manifest
+import android.app.ActivityManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -8,29 +9,59 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.location.Address
+import android.location.Geocoder
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.os.BatteryManager
+import android.os.Build
+import android.os.Environment
+import android.os.Looper
+import android.os.StatFs
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.yangz3720.simplywork.infrastructure.error.InfrastructureException
 import com.yangz3720.simplywork.infrastructure.systemops.SystemCapabilityProbe
+import com.yangz3720.simplywork.infrastructure.systemops.SystemPermissionRequester
+import com.yangz3720.simplywork.infrastructure.systemops.model.AppListSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.CalendarInsertSpec
+import com.yangz3720.simplywork.infrastructure.systemops.model.CalendarQuerySpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.CalendarWriteMode
 import com.yangz3720.simplywork.infrastructure.systemops.model.LaunchContext
+import com.yangz3720.simplywork.infrastructure.systemops.model.LocationAccuracy
+import com.yangz3720.simplywork.infrastructure.systemops.model.LocationReadSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.NotificationPostSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.SystemOperationResult
 import com.yangz3720.simplywork.infrastructure.systemops.model.SystemOperationResult.PermissionRequired
 import com.yangz3720.simplywork.infrastructure.systemops.model.SystemOperationResult.SecurityBlocked
 import com.yangz3720.simplywork.infrastructure.systemops.model.SystemOperationResult.Success
 import com.yangz3720.simplywork.infrastructure.systemops.model.SystemOperationResult.TargetNotFound
+import com.yangz3720.simplywork.infrastructure.systemops.model.TimeCalcSpec
+import com.yangz3720.simplywork.infrastructure.systemops.model.TimeCalculation
+import com.yangz3720.simplywork.infrastructure.systemops.model.TimePoint
 import com.yangz3720.simplywork.infrastructure.util.AgentLogger
+import java.time.Instant
+import java.time.ZoneId
+import java.util.Locale
+import java.util.TimeZone
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
-import java.time.Instant
-import java.time.ZoneId
-import java.util.TimeZone
+import kotlinx.serialization.json.putJsonArray
+import kotlin.coroutines.resume
 
 private const val TAG = "SystemOps"
 
@@ -40,16 +71,36 @@ internal const val BACKGROUND_CLIPBOARD_WRITE_MSG = "Background clipboard write 
 
 private const val LAUNCH_FALLBACK_CHANNEL_ID = "systemops_launch_fallback"
 
+/** `sys_calendar_query` default horizon when the model gives no window. */
+private const val DEFAULT_CALENDAR_WINDOW_MS = 7L * 24 * 60 * 60 * 1000
+
+/**
+ * Budget for a *fresh* GPS/network fix. Kept under the router's 10 s operation timeout so the
+ * tool returns a usable answer (possibly a stale fix, flagged) instead of being killed by
+ * `withTimeout` mid-request.
+ */
+private const val FRESH_FIX_BUDGET_MS = 7_000L
+
+/** Sub-budget for the optional reverse geocode, so it cannot eat the router's 10 s window. */
+private const val GEOCODE_BUDGET_MS = 2_500L
+
+/** CalendarContract "deleted" column (see usage in queryCalendarEvents for why it is a literal). */
+private const val CALENDAR_DELETED_COLUMN = "deleted"
+
 /**
  * Android implementation of the Intent main path.
  *
  * [isAppForeground] is injectable so instrumented tests can pin the focus state; the
  * production default samples [ActivityManager]-based process importance (see [defaultForegroundCheck]).
+ *
+ * [permissionRequester] is the P4 grant seam used by the v1.2 read tools; the default never
+ * prompts, so unit tests and any non-UI host keep the pre-v1.2 "report PermissionRequired" behaviour.
  */
 class SystemIntentExecutorImpl(
     private val context: Context,
     private val probe: SystemCapabilityProbe,
-    private val isAppForeground: () -> Boolean = { defaultForegroundCheck(context) }
+    private val isAppForeground: () -> Boolean = { defaultForegroundCheck(context) },
+    private val permissionRequester: SystemPermissionRequester = SystemPermissionRequester.None
 ) : SystemIntentExecutor {
 
     private val packageManager get() = context.packageManager
@@ -326,6 +377,490 @@ class SystemIntentExecutorImpl(
             .atZone(zone).toLocalDate().plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
         return begin to end
     }
+
+    // ----- read-side operations (v1.2) -----
+
+    override suspend fun readCurrentTime(): SystemOperationResult {
+        val now = TimePoint.of(System.currentTimeMillis())
+        return Success(timePointJson(now))
+    }
+
+    override suspend fun calculateTime(spec: TimeCalcSpec): SystemOperationResult {
+        val shift = TimeCalculation.resolve(spec, System.currentTimeMillis())
+            .getOrElse { return SystemOperationResult.Failed(it.message ?: "invalid time arguments") }
+        val base = shift.base
+        return Success(
+            buildJsonObject {
+                put("epochMs", shift.target.epochMs)
+                put("epochSeconds", shift.target.epochMs / 1000)
+                put("localIso", shift.target.localIso)
+                put("localDate", shift.target.localDate)
+                put("localTime", shift.target.localTime)
+                put("weekday", shift.target.weekday)
+                put("timeZoneId", shift.target.timeZoneId)
+                put("utcOffsetMinutes", shift.target.utcOffsetMinutes)
+                put("deltaMs", shift.deltaMs)
+                put("baseLocalIso", base.localIso)
+                put("baseWeekday", base.weekday)
+            }
+        )
+    }
+
+    override suspend fun readDeviceInfo(): SystemOperationResult = withContext(Dispatchers.IO) {
+        val battery = stickyBatteryIntent()
+        val level = battery?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = battery?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        val percent = if (level >= 0 && scale > 0) level * 100 / scale else null
+        val plugged = battery?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0
+        val status = battery?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+        val storage = storageSnapshot()
+
+        Success(
+            buildJsonObject {
+                put("batteryPercent", percent?.let { JsonPrimitive(it) } ?: JsonNull)
+                put("batteryCharging", plugged != 0)
+                put("batteryStatus", batteryStatusName(status))
+                put("powerSaveMode", powerSaveMode())
+                put("network", networkSnapshot())
+                put("storage", storage)
+                put("memory", memorySnapshot())
+                put("uptimeMs", SystemClock.elapsedRealtime())
+                put("device", buildJsonObject {
+                    put("manufacturer", Build.MANUFACTURER)
+                    put("brand", Build.BRAND)
+                    put("model", Build.MODEL)
+                    put("androidRelease", Build.VERSION.RELEASE)
+                    put("sdkInt", Build.VERSION.SDK_INT)
+                })
+                put("locale", Locale.getDefault().toLanguageTag())
+                put("timeZone", ZoneId.systemDefault().id)
+            }
+        )
+    }
+
+    override suspend fun listInstalledApps(spec: AppListSpec): SystemOperationResult =
+        withContext(Dispatchers.IO) {
+            val needle = spec.query?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+            val inventory = try {
+                if (spec.launchableOnly) {
+                    packageManager
+                        .queryIntentActivities(
+                            Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER),
+                            PackageManager.ResolveInfoFlags.of(0L)
+                        )
+                        .associate { it.activityInfo.packageName to it.loadLabel(packageManager).toString() }
+                } else {
+                    packageManager
+                        .getInstalledPackages(PackageManager.PackageInfoFlags.of(0L))
+                        .associate { info ->
+                            info.packageName to (info.applicationInfo
+                                ?.loadLabel(packageManager)?.toString() ?: info.packageName)
+                        }
+                }
+            } catch (e: Exception) {
+                throw InfrastructureException.SystemOperation.AppInventoryFailed(
+                    e.message ?: "unknown error", e
+                )
+            }
+            val matching = inventory.entries
+                .filter { needle == null || it.key.lowercase().contains(needle) || it.value.lowercase().contains(needle) }
+                .sortedBy { it.value.lowercase() }
+            val page = matching.take(spec.limit)
+            Success(
+                buildJsonObject {
+                    put("totalMatching", matching.size)
+                    put("returned", page.size)
+                    put("truncated", matching.size > page.size)
+                    putJsonArray("apps") {
+                        page.forEach { (pkg, label) ->
+                            add(buildJsonObject {
+                                put("packageName", pkg)
+                                put("label", label)
+                            })
+                        }
+                    }
+                }
+            )
+        }
+
+    override suspend fun queryCalendarEvents(spec: CalendarQuerySpec): SystemOperationResult {
+        val rationale = "Reading your calendar needs READ_CALENDAR. If you deny it, the agent can " +
+            "still add events in EDITOR_INTENT mode, which asks you inside the calendar app and needs no permission."
+        ensurePermissions(listOf(Manifest.permission.READ_CALENDAR), rationale)?.let { return it }
+
+        return withContext(Dispatchers.IO) {
+            val start = spec.startTimeEpochMs ?: System.currentTimeMillis()
+            val end = spec.endTimeEpochMs ?: (start + DEFAULT_CALENDAR_WINDOW_MS)
+            val needle = spec.query?.trim()?.takeIf { it.isNotEmpty() }
+            val events = ArrayList<kotlinx.serialization.json.JsonObject>(spec.limit)
+            try {
+                // Instances (not Events) so recurring appointments expand into real occurrences.
+                val uri = android.provider.CalendarContract.Instances.CONTENT_URI
+                    .buildUpon()
+                    .appendPath(start.toString())
+                    .appendPath(end.toString())
+                    .build()
+                val selection = buildString {
+                    // "deleted" is CalendarContract.SyncColumns.DELETED. That interface is
+                    // protected in CalendarContract and Kotlin does not resolve the constant
+                    // through the Instances/Events aliases, so the column name is spelled out.
+                    append("$CALENDAR_DELETED_COLUMN = 0")
+                    if (needle != null) {
+                        append(" AND ${android.provider.CalendarContract.Instances.TITLE} LIKE ?")
+                    }
+                }
+                val args = if (needle != null) arrayOf("%$needle%") else emptyArray()
+                context.contentResolver.query(
+                    uri,
+                    arrayOf(
+                        android.provider.CalendarContract.Instances._ID,
+                        android.provider.CalendarContract.Instances.CALENDAR_ID,
+                        android.provider.CalendarContract.Instances.TITLE,
+                        android.provider.CalendarContract.Instances.ALL_DAY,
+                        android.provider.CalendarContract.Instances.BEGIN,
+                        android.provider.CalendarContract.Instances.END,
+                        android.provider.CalendarContract.Instances.EVENT_LOCATION,
+                        android.provider.CalendarContract.Instances.DESCRIPTION
+                    ),
+                    selection,
+                    args,
+                    "${android.provider.CalendarContract.Instances.BEGIN} ASC LIMIT ${spec.limit}"
+                )?.use { cursor ->
+                    val titleIdx = cursor.getColumnIndexOrThrow(android.provider.CalendarContract.Instances.TITLE)
+                    val beginIdx = cursor.getColumnIndexOrThrow(android.provider.CalendarContract.Instances.BEGIN)
+                    val endIdx = cursor.getColumnIndexOrThrow(android.provider.CalendarContract.Instances.END)
+                    val allDayIdx = cursor.getColumnIndexOrThrow(android.provider.CalendarContract.Instances.ALL_DAY)
+                    val locationIdx = cursor.getColumnIndexOrThrow(android.provider.CalendarContract.Instances.EVENT_LOCATION)
+                    val calendarIdx = cursor.getColumnIndexOrThrow(android.provider.CalendarContract.Instances.CALENDAR_ID)
+                    while (cursor.moveToNext()) {
+                        val begin = cursor.getLong(beginIdx)
+                        val eventEnd = cursor.getLong(endIdx)
+                        events.add(buildJsonObject {
+                            put("title", cursor.getString(titleIdx) ?: "(untitled)")
+                            put("startTimeEpochMs", begin)
+                            put("endTimeEpochMs", eventEnd)
+                            // All-day rows are stored against UTC midnight, so the local ISO
+                            // rendering can land on the neighbouring day; epochMs is authoritative.
+                            put("startLocalIso", TimePoint.of(begin).localIso)
+                            put("endLocalIso", TimePoint.of(eventEnd).localIso)
+                            put("weekday", TimePoint.of(begin).weekday)
+                            put("allDay", cursor.getInt(allDayIdx) == 1)
+                            cursor.getString(locationIdx)?.takeIf { it.isNotBlank() }?.let { put("location", it) }
+                            put("calendarId", cursor.getLong(calendarIdx))
+                        })
+                    }
+                }
+            } catch (e: SecurityException) {
+                // Revoked between the check and the query — report, never swallow (P2).
+                return@withContext PermissionRequired(
+                    permissions = listOf(Manifest.permission.READ_CALENDAR),
+                    rationale = "Calendar provider denied the query: ${e.message}"
+                )
+            } catch (e: Exception) {
+                throw InfrastructureException.SystemOperation.CalendarQueryFailed(
+                    e.message ?: "unknown error", e
+                )
+            }
+            Success(
+                buildJsonObject {
+                    put("windowStartIso", TimePoint.of(start).localIso)
+                    put("windowEndIso", TimePoint.of(end).localIso)
+                    put("count", events.size)
+                    putJsonArray("events") { events.forEach { add(it) } }
+                }
+            )
+        }
+    }
+
+    override suspend fun readLocation(spec: LocationReadSpec): SystemOperationResult {
+        val required = if (spec.accuracy == LocationAccuracy.PRECISE) {
+            listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+        } else {
+            listOf(Manifest.permission.ACCESS_COARSE_LOCATION)
+        }
+        val rationale = "Locating this device needs ${required.joinToString()}."
+        // "any" not "all": Android 12+ lets the user pick approximate-only, which still yields a
+        // legitimate coarse fix. Demanding FINE here would fail a call that has usable data, and
+        // the output already reports precisionDegraded when precision was not honored.
+        ensureAnyPermission(required, rationale)?.let { return it }
+        return withContext(Dispatchers.IO) { locate(spec) }
+    }
+
+    private suspend fun locate(spec: LocationReadSpec): SystemOperationResult {
+        val manager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+            ?: return SystemOperationResult.Failed("This device has no location service")
+        val enabled = try {
+            manager.allProviders.filter { manager.isProviderEnabled(it) }
+        } catch (e: Exception) {
+            throw InfrastructureException.SystemOperation.LocationReadFailed(
+                e.message ?: "unknown error", e
+            )
+        }
+        if (enabled.isEmpty()) {
+            return SecurityBlocked(
+                "Device location is switched off — no GPS or network provider is enabled. " +
+                    "Ask the user to turn on Location in system settings, then retry."
+            )
+        }
+        // Order the enabled providers by how well they match the requested precision.
+        val preferred = (
+            if (spec.accuracy == LocationAccuracy.PRECISE) {
+                listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER, LocationManager.PASSIVE_PROVIDER)
+            } else {
+                listOf(LocationManager.NETWORK_PROVIDER, LocationManager.PASSIVE_PROVIDER, LocationManager.GPS_PROVIDER)
+            }
+            ).filter(enabled::contains)
+        if (preferred.isEmpty()) {
+            return SecurityBlocked(
+                "No enabled location provider can satisfy ${spec.accuracy}; enabled providers: $enabled"
+            )
+        }
+
+        // Location.getTime() is wall-clock epoch ms, so staleness must be measured against
+        // System.currentTimeMillis() — elapsedRealtime() (since boot) would be nonsense here.
+        val maxAgeMs = spec.maxAgeSeconds.coerceAtLeast(0) * 1000L
+        val cached = freshestCachedFix(manager, preferred)
+        val fresh = if (cached != null && cached.ageMs <= maxAgeMs) {
+            null
+        } else {
+            awaitFreshFix(manager, preferred.first())
+        }
+        val fix = fresh ?: cached?.location
+            ?: return SystemOperationResult.Failed(
+                "No position fix available: no cached fix and none produced within ${FRESH_FIX_BUDGET_MS}ms " +
+                    "(GPS indoors can take much longer). Retry with accuracy=APPROXIMATE, or ask the user for their city."
+            )
+
+        val fineGranted = isGranted(Manifest.permission.ACCESS_FINE_LOCATION)
+        // Resolved before the JSON builder: geocoding is a suspend call and may hit the network.
+        val address = if (spec.includeAddress) geocode(fix) else null
+        return Success(
+            buildJsonObject {
+                put("latitude", fix.latitude)
+                put("longitude", fix.longitude)
+                put("accuracyMeters", fix.accuracy.toDouble())
+                put("provider", fix.provider ?: "unknown")
+                put("timestampEpochMs", fix.time)
+                put("fixAgeSeconds", (System.currentTimeMillis() - fix.time) / 1000)
+                put("isFromCache", fresh == null)
+                // Android 12+ lets the user grant approximate-only; report it instead of
+                // letting the model assume the precision it asked for.
+                put("fineLocationGranted", fineGranted)
+                if (spec.accuracy == LocationAccuracy.PRECISE && !fineGranted) {
+                    put("precisionDegraded", "user granted approximate location only")
+                }
+                if (fix.hasAltitude()) put("altitudeMeters", fix.altitude)
+                if (fix.hasBearing()) put("bearingDegrees", fix.bearing.toDouble())
+                if (fix.hasSpeed()) put("speedMetersPerSecond", fix.speed.toDouble())
+                address?.let { geo ->
+                    geo.line?.let { put("address", it) }
+                    geo.country?.let { put("country", it) }
+                    geo.unavailable?.let { put("addressUnavailable", it) }
+                }
+            }
+        )
+    }
+
+    /**
+     * Reverse geocode via the framework [Geocoder].
+     *
+     * Deliberately a soft field, never a failed call: a device without a geocoder backend
+     * (common on Google-less ROMs) still has a perfectly valid fix, and failing the whole
+     * tool for an optional label would throw that away.
+     */
+    private suspend fun geocode(location: Location): GeocodedAddress {
+        if (!Geocoder.isPresent()) return GeocodedAddress(null, null, "no geocoder backend on this device")
+        val addresses = withTimeoutOrNull(GEOCODE_BUDGET_MS) {
+            suspendCancellableCoroutine<List<Address>> { continuation ->
+                try {
+                    Geocoder(context, Locale.getDefault()).getFromLocation(
+                        location.latitude,
+                        location.longitude,
+                        1,
+                        object : Geocoder.GeocodeListener {
+                            override fun onGeocode(result: List<Address>) {
+                                if (continuation.isActive) continuation.resume(result)
+                            }
+
+                            override fun onError(errorMessage: String?) {
+                                if (continuation.isActive) continuation.resume(emptyList())
+                            }
+                        }
+                    )
+                } catch (e: Exception) {
+                    if (continuation.isActive) continuation.resume(emptyList())
+                }
+            }
+        } ?: return GeocodedAddress(null, null, "geocode timed out after ${GEOCODE_BUDGET_MS}ms")
+
+        val match = addresses.firstOrNull()
+            ?: return GeocodedAddress(null, null, "geocoder returned no match")
+        val parts = listOfNotNull(match.adminArea, match.locality, match.subLocality, match.thoroughfare, match.subThoroughfare)
+        val line = parts.joinToString(", ").ifBlank { match.getAddressLine(0).orEmpty() }
+        return if (line.isBlank()) {
+            GeocodedAddress(null, null, "geocoder returned an empty address")
+        } else {
+            GeocodedAddress(line, match.countryName?.takeIf { it.isNotBlank() }, null)
+        }
+    }
+
+    /** Address label + country, or why they are unavailable. */
+    private data class GeocodedAddress(val line: String?, val country: String?, val unavailable: String?)
+
+    private fun freshestCachedFix(manager: LocationManager, providers: List<String>): CachedFix? {
+        val now = System.currentTimeMillis()
+        val best = providers.mapNotNull { provider ->
+            try {
+                manager.getLastKnownLocation(provider)
+            } catch (e: SecurityException) {
+                null // provider-level gate raced with a revocation; other providers may still answer
+            }
+        }.maxByOrNull { it.time } ?: return null
+        return CachedFix(best, now - best.time)
+    }
+
+    /**
+     * One update from [provider], or null when none arrives in time.
+     *
+     * The listener is unregistered on *every* exit path — on delivery, on cancellation, and on
+     * a failed subscribe. A leaked location listener drains battery continuously, which is not
+     * something a one-shot tool call should ever leave behind.
+     */
+    private suspend fun awaitFreshFix(manager: LocationManager, provider: String): Location? =
+        withTimeoutOrNull(FRESH_FIX_BUDGET_MS) {
+            suspendCancellableCoroutine { continuation ->
+                val listener = object : LocationListener {
+                    override fun onLocationChanged(location: Location) {
+                        try {
+                            manager.removeUpdates(this)
+                        } catch (_: SecurityException) {
+                            // Permission revoked mid-flight; the system has already stopped delivery.
+                        }
+                        if (continuation.isActive) continuation.resume(location)
+                    }
+                }
+                continuation.invokeOnCancellation {
+                    try {
+                        manager.removeUpdates(listener)
+                    } catch (_: SecurityException) {
+                        // same as above
+                    }
+                }
+                try {
+                    // Main looper: this body runs on Dispatchers.IO, which has no Looper of its own.
+                    manager.requestLocationUpdates(provider, 0L, 0f, listener, Looper.getMainLooper())
+                } catch (e: Exception) {
+                    AgentLogger.w(TAG) { "fresh fix request failed on $provider: ${e.message}" }
+                    if (continuation.isActive) continuation.resume(null)
+                }
+            }
+        }
+
+    // ----- permission seam (P4) -----
+
+    private fun isGranted(permission: String): Boolean =
+        ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+
+    /**
+     * @return null when every [permissions] is granted, otherwise the result to hand back.
+     * Asks the injected [permissionRequester] once before giving up (P4: the UI performs the
+     * grant, we only report), then re-checks — "user tapped Allow" is not the same as granted.
+     */
+    private suspend fun ensurePermissions(permissions: List<String>, rationale: String): SystemOperationResult? {
+        if (permissions.all(::isGranted)) return null
+        permissionRequester.request(permissions, rationale)
+        val stillMissing = permissions.filterNot(::isGranted)
+        return if (stillMissing.isEmpty()) null else PermissionRequired(stillMissing, rationale)
+    }
+
+    /**
+     * Variant for capabilities that degrade instead of failing: proceeds as soon as *any* of
+     * [permissions] is held. Only reports PermissionRequired when none of them came through.
+     */
+    private suspend fun ensureAnyPermission(permissions: List<String>, rationale: String): SystemOperationResult? {
+        if (permissions.any(::isGranted)) return null
+        permissionRequester.request(permissions, rationale)
+        val held = permissions.filter(::isGranted)
+        return if (held.isEmpty()) PermissionRequired(permissions, rationale) else null
+    }
+
+    // ----- device snapshot helpers -----
+
+    /** Sticky-intent read: no exported receiver is registered, so no runtime permission needed. */
+    private fun stickyBatteryIntent(): Intent? = try {
+        ContextCompat.registerReceiver(
+            context, null, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun powerSaveMode(): Boolean = try {
+        (context.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager)?.isPowerSaveMode == true
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun networkSnapshot() = buildJsonObject {
+        val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        val capabilities = manager?.activeNetwork?.let { manager.getNetworkCapabilities(it) }
+        val transports = capabilities?.let { caps ->
+            listOfNotNull(
+                "wifi".takeIf { caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) },
+                "cellular".takeIf { caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) },
+                "ethernet".takeIf { caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) },
+                "vpn".takeIf { caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) },
+                "bluetooth".takeIf { caps.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH) }
+            )
+        }.orEmpty()
+        put("connected", capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true)
+        put("transports", JsonArray(transports.map { JsonPrimitive(it) }))
+        put(
+            "metered",
+            capabilities?.let { JsonPrimitive(!it.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)) }
+                ?: JsonNull
+        )
+    }
+
+    private fun storageSnapshot() = buildJsonObject {
+        val stat = StatFs(Environment.getDataDirectory().absolutePath)
+        put("totalBytes", stat.totalBytes)
+        put("availableBytes", stat.availableBytes)
+        put(
+            "availablePercent",
+            if (stat.totalBytes > 0) JsonPrimitive(stat.availableBytes * 100 / stat.totalBytes) else JsonNull
+        )
+    }
+
+    private fun memorySnapshot() = buildJsonObject {
+        val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        val info = manager?.let { ActivityManager.MemoryInfo().also { m -> manager.getMemoryInfo(m) } }
+        put("totalBytes", info?.let { JsonPrimitive(it.totalMem) } ?: JsonNull)
+        put("availableBytes", info?.let { JsonPrimitive(it.availMem) } ?: JsonNull)
+        put("lowMemory", info?.let { JsonPrimitive(it.lowMemory) } ?: JsonNull)
+    }
+
+    private fun batteryStatusName(status: Int): String = when (status) {
+        BatteryManager.BATTERY_STATUS_CHARGING -> "charging"
+        BatteryManager.BATTERY_STATUS_DISCHARGING -> "discharging"
+        BatteryManager.BATTERY_STATUS_FULL -> "full"
+        BatteryManager.BATTERY_STATUS_NOT_CHARGING -> "notCharging"
+        else -> "unknown"
+    }
+
+    private fun timePointJson(point: TimePoint) = buildJsonObject {
+        put("epochMs", point.epochMs)
+        put("epochSeconds", point.epochMs / 1000)
+        put("localIso", point.localIso)
+        put("localDate", point.localDate)
+        put("localTime", point.localTime)
+        put("weekday", point.weekday)
+        put("timeZoneId", point.timeZoneId)
+        put("utcOffsetMinutes", point.utcOffsetMinutes)
+    }
+
+    /** A last-known fix plus how long ago (wall clock) the device saw it. */
+    private data class CachedFix(val location: Location, val ageMs: Long)
 
     // ----- helpers -----
 

@@ -45,6 +45,9 @@ sealed class InfrastructureException(
         class ClipboardOperationFailed(message: String, cause: Throwable? = null) : SystemOperation("Clipboard operation failed: $message", cause)
         class CalendarWriteFailed(message: String, cause: Throwable? = null) : SystemOperation("Calendar write failed: $message", cause)
         class NotificationPostFailed(message: String, cause: Throwable? = null) : SystemOperation("Notification post failed: $message", cause)
+        class CalendarQueryFailed(message: String, cause: Throwable? = null) : SystemOperation("Calendar query failed: $message", cause)
+        class LocationReadFailed(message: String, cause: Throwable? = null) : SystemOperation("Location read failed: $message", cause)
+        class AppInventoryFailed(message: String, cause: Throwable? = null) : SystemOperation("Installed-app query failed: $message", cause)
     }
 
     /**

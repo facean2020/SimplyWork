@@ -1,9 +1,19 @@
 # 系统元操作层设计（SystemOps / Intent 主路径）
 
-> **状态**：设计基线 v1.1（2026-08-30，已实现）
+> **状态**：设计基线 v1.2（2026-09-11）
 > **上游文档**：`architecture.md` / `android-agent.md`
 > **关系**：本文档细化 `architecture.md` 中「基础提供层 → app-function」一节，作为实现的唯一设计依据。原一节中的粗粒度描述与本文冲突时，**以本文为准**。
-> **实现状态**：**Phase 1 已实现**（`infrastructure.systemops`，26 个 JVM 单测通过）。
+> **实现状态**：**Phase 1 + Phase 4 已实现**（`infrastructure.systemops`）。
+>
+> **v1.2 修订（读侧能力补齐 2026-09-11）**：
+> - **新增 6 个 `sys_*` 读工具**（目录 7 → 13）：`sys_time_read` / `sys_time_calc` / `sys_device_read` / `sys_app_list` / `sys_calendar_query` / `sys_location_read`。动机是模型侧的三个硬缺口：
+>   1. **模型没有任何时间感**：`AgentConfig.DEFAULT_SYSTEM_PROMPT` 与 `AgentContextAssembler` 的注入链都不含当前时间，而 `sys_calendar_insert` 的入参是 `startTimeEpochMs`（int64 epoch 毫秒）——没有读钟工具，任何排期都只能靠猜，日历写入实际处于残废状态。
+>   2. **日历只有写没有读**：无法回答"今天/本周有什么安排"。
+>   3. **完全没有定位与应用清单**：`sys_app_open` 要求模型给出精确包名，但没有列举手段，只能猜包名并稳定吃到 `target_not_found`。
+> - **执行路径不新增**：6 个读工具全部继续走 `SystemOperationRouter`（继承超时 + 异常归一 + 计时），`ExecutionPath` 不扩枚举。它们不是 Intent，但 v1.1 起 `SystemIntentExecutor` 实际已承载 ClipboardManager / NotificationManager 等非 Intent 操作，沿用同一执行器以免为一个命名洁癖改动门面契约。**记为命名债**：执行器现名与职责已不符，待 tool-core 正式落地时一并更名。
+> - **新增 P4 权限申请缝 `SystemPermissionRequester`**：基础设施仍然**不弹**任何对话框，但可以在缺权限时"邀请"UI 层去弹，拿到结果后**复查**权限再决定放行。这与 agent-core 的 `AuditApprovalHandler` 完全同构（后台循环挂起等 UI 决策），UI 侧实现为 `PermissionCoordinator`（对齐既有 `ApprovalCoordinator`）。此前全 App 只有 `checkSelfPermission` 检查、没有任何申请代码，`PermissionRequired` 是死路。
+> - **依赖仍然零新增**：定位走框架 `LocationManager`（工程无 Play Services，不为此引入）；日期走 `java.time`（minSdk 34，不引入 kotlinx-datetime）；反向地理编码走框架 `Geocoder` 非弃用的 `GeocodeListener` 重载。
+> - 原 v1.1 修订记录见下。
 >
 > **v1.1 修订（评审结论 2026-08-30）**：
 > - **剔除 AppFunctions 增强路径**：侧载分发拿不到 `EXECUTE_APP_FUNCTIONS` 门禁（signature|privileged + 角色白名单），且引入 compileSdk 36 工具链升级负担，收益为零 → 整条路径取消（原 §5.2 / C1 / C2 / C7 / C8 / Q1 / Q2 / Q5 一并废止）。
@@ -40,9 +50,11 @@
 | C4 | **后台启动 Activity 受限**，且系统**静默丢弃**（不抛异常）| Android 10+ | 发 DeepLink / 分享面板前必须先决策（`LaunchPolicy`）：前台 → 直接发；有 SAW 豁免 → 直接发；否则降级为通知路径（用户点击通知 = 用户主动，天然合规）|
 | C5 | `POST_NOTIFICATIONS` 为运行时权限 | API 33+（本项目 minSdk 34，全量适用） | 发通知前必须探测并返回 `PermissionRequired` |
 | C6 | 侧载应用启用 AccessibilityService 受 **Restricted Settings** 限制 | Android 13+ | 仅与延后的 Automation 路径相关，恢复排期时须提供引导 UI |
+| C9 | **定位是"权限 + 开关"双重门禁**：`ACCESS_COARSE_LOCATION` / `ACCESS_FINE_LOCATION` 是运行时权限，且设备"位置"总开关关闭时所有 provider 均不可用 | Android 6+ / 全量 | 两者必须可区分：缺权限 → `PermissionRequired`（可申请）；provider 全关 → `SecurityBlocked`（用户须去系统设置打开，申请权限无用）。混淆两者会让模型盲目重试（P2） |
+| C10 | **反向地理编码不是本地操作**：框架 `Geocoder` 的实现可能自连网络，且部分 ROM 无后端 | 全版本 | `includeAddress` 只能是**软字段**：无后端 / 超时 / 无结果时写 `addressUnavailable`，绝不让整次定位失败——坐标本身已经有效 |
 
 > 工具链现状：AGP 8.8 / compileSdk 35 / minSdk 34 / Kotlin 2.1。全部能力在 API 34/35 基线内实现，**无任何 API 36 依赖**。
-> Manifest 声明：`POST_NOTIFICATIONS`、`READ_CALENDAR` / `WRITE_CALENDAR`（仅 DIRECT_WRITE 用）、`SYSTEM_ALERT_WINDOW`（C4 豁免，设置页授予）、`QUERY_ALL_PACKAGES`（侧载分发，免去逐目标 `<queries>` 声明）。
+> Manifest 声明：`POST_NOTIFICATIONS`、`READ_CALENDAR`（`sys_calendar_query` + DIRECT_WRITE 用）/ `WRITE_CALENDAR`（仅 DIRECT_WRITE 用）、`SYSTEM_ALERT_WINDOW`（C4 豁免，设置页授予）、`QUERY_ALL_PACKAGES`（侧载分发，免去逐目标 `<queries>` 声明）、`ACCESS_NETWORK_STATE`（`sys_device_read` 读网络能力，normal 权限装即授）、`ACCESS_COARSE_LOCATION` / `ACCESS_FINE_LOCATION`（`sys_location_read`，运行时），另有 `android.hardware.location(.gps)` 声明为 `required=false`（无定位硬件的设备上 App 仍可安装，工具退化为 `SecurityBlocked`）。
 
 ---
 
@@ -73,6 +85,13 @@ flowchart LR
 | 读 / 写剪贴板 | ClipboardManager（仅前台焦点） | C3 |
 | 发通知 | NotificationManager（需 C5 权限） | C5 |
 | 系统分享 | ACTION_SEND chooser（同 C4 策略） | C4 |
+| 读当前时间 / 相对日期推算 | 进程内 `java.time`（无 I/O、无权限） | — |
+| 读设备状态（电量/网络/存储/内存/机型） | `registerReceiver(null, …)` 粘滞广播 + `ConnectivityManager` + `StatFs` + `ActivityManager` | C10 无关；`ACCESS_NETWORK_STATE` 为 normal 权限 |
+| 读已安装应用清单 | `PackageManager.queryIntentActivities` / `getInstalledPackages` | 依赖 `QUERY_ALL_PACKAGES` 才有完整可见性 |
+| 读日历事件 | `ContentResolver` 查 `CalendarContract.Instances`（**不是 Events**：只有 Instances 会把周期事件展开成真实发生次） | READ_CALENDAR（运行时） |
+| 读设备定位 | 框架 `LocationManager`（无 Play Services 依赖）：last-known 优先，过期才请求单次定位 | C9 双门禁；C10 地址为软字段 |
+
+> v1.2 读侧一览：这 6 类操作**都不是 Intent**，但一律经 `SystemOperationRouter` 分发，以继承超时（10 s）、异常归一与统一计时。§3.1「Router 是唯一门面」是硬约束——读操作也不许旁路。
 
 ---
 
@@ -125,13 +144,39 @@ sealed interface OperationSpec { val dangerLevel: DangerLevel }
 
 enum class LaunchContext { AUTO, FOREGROUND_NOW, FROM_OVERLAY_SERVICE, VIA_NOTIFICATION_FALLBACK }
 enum class CalendarWriteMode { EDITOR_INTENT, DIRECT_WRITE }
+
+// ----- v1.2 读侧规格 -----
+@Serializable data object TimeReadSpec                       // SAFE
+@Serializable data class TimeCalcSpec(
+    val amount: Int = 0, val unit: TimeUnit = TimeUnit.DAY,
+    val weekday: Weekday? = null, val timeOfDay: String? = null, val baseEpochMs: Long? = null
+)                                                                          // SAFE
+@Serializable data object DeviceReadSpec                     // SAFE
+@Serializable data class AppListSpec(val query: String? = null, val limit: Int = 40, val launchableOnly: Boolean = true)  // SAFE
+@Serializable data class CalendarQuerySpec(
+    val startTimeEpochMs: Long? = null, val endTimeEpochMs: Long? = null,
+    val query: String? = null, val limit: Int = 20
+)                                                                          // USER_CONFIRMING
+@Serializable data class LocationReadSpec(
+    val accuracy: LocationAccuracy = LocationAccuracy.APPROXIMATE,
+    val maxAgeSeconds: Int = 120, val includeAddress: Boolean = false
+)                                                                          // USER_CONFIRMING
+
+enum class TimeUnit { SECOND, MINUTE, HOUR, DAY, WEEK, MONTH, YEAR }
+enum class Weekday { MONDAY, …, SUNDAY }
+enum class LocationAccuracy { APPROXIMATE, PRECISE }
 ```
+
+> **读侧危险等级的划分依据是"数据归属"，不是"操作类型"**：时钟、电量、包列表是设备状态 → `SAFE`；日程内容与实时坐标是用户私有数据 → `USER_CONFIRMING`（每次调用都过 HITL）。注意 `sys_calendar_query` 比 `sys_calendar_insert` 的默认模式（`EDITOR_INTENT` = `USER_VISIBLE`）**更受限**——编辑器由日历 App 自行确认且从不把既有日程暴露给我们，而查询是把整本日程读进上下文。
+> **`TimeCalcSpec` 三步语义固定**：先按 `amount`+`unit` 偏移 → 再**严格向后**推进到 `weekday`（`next(FRIDAY)` 不含当天，这正是"下周五"；"这周五"用 amount/unit 表达）→ 最后用 `timeOfDay` 覆盖时刻。月/年偏移按 `java.time` 语义钳制到合法日（1/31 + 1 月 = 2/28）。
 
 > 修订说明：`ClipboardReadSpec.foregroundOnly` 移除——Intent 单路径下剪贴板**永远**前台判定，参数无意义。时间统一 `epochMs`（免引入 kotlinx-datetime）；all-day 事件按本地午夜对齐（结束时间为次日午夜，排他）。
 
 ### 4.3 异常体系衔接
 
-`InfrastructureException.SystemOperation`（`error/InfrastructureExceptions.kt`：IntentLaunchFailed / ClipboardOperationFailed / CalendarWriteFailed / NotificationPostFailed）是**抛出型异常**通道，用于执行器内部错误冒泡；对 LLM/tool-core 的**结果型反馈**一律走 `SystemOperationResult`。Router 统一 catch 并归一为 `Failed`，并放行外部取消（`CancellationException` 原样重抛）。
+`InfrastructureException.SystemOperation`（`error/InfrastructureExceptions.kt`：IntentLaunchFailed / ClipboardOperationFailed / CalendarWriteFailed / NotificationPostFailed，v1.2 增补 CalendarQueryFailed / LocationReadFailed / AppInventoryFailed）是**抛出型异常**通道，用于执行器内部错误冒泡；对 LLM/tool-core 的**结果型反馈**一律走 `SystemOperationResult`。Router 统一 catch 并归一为 `Failed`，并放行外部取消（`CancellationException` 原样重抛）。
+
+> v1.2 补一句边界：**权限缺失与开关关闭不是异常**，走 `PermissionRequired` / `SecurityBlocked` 结果通道；只有 provider 崩溃、`PackageManager` 抛错这类基础设施故障才进抛出通道。
 
 ---
 
@@ -187,8 +232,11 @@ interface SystemOperationRouter {
 
 ### 5.4 `SystemOperationToolFactory.kt` — tool-core 收敛（§6.1 落点）
 
-- 7 个封闭工具（`sys_deeplink_open` / `sys_app_open` / `sys_clipboard_read` / `sys_clipboard_write` / `sys_calendar_insert` / `sys_notify_post` / `sys_share_text`），`SystemToolEntry(definition, dangerLevel, specKind)` 携带审计元数据（P3）。
+- 13 个封闭工具（v1.1 七个：`sys_deeplink_open` / `sys_app_open` / `sys_clipboard_read` / `sys_clipboard_write` / `sys_calendar_insert` / `sys_notify_post` / `sys_share_text`；v1.2 读侧六个：`sys_time_read` / `sys_time_calc` / `sys_device_read` / `sys_app_list` / `sys_calendar_query` / `sys_location_read`），`SystemToolEntry(definition, dangerLevel, specKind)` 携带审计元数据（P3）。
 - `parseArguments(toolName, argumentsJson): Result<OperationSpec>` 供 tool-core 把模型产物还原为 spec 再交给 Router 分发；容忍未知多余键，缺必填字段即失败。
+- **参数越界在解析期抛、不在执行期静默钳制**：`limit` / `maxAgeSeconds` / `amount` / `timeOfDay` 越界即 `Result.failure`，审计门禁据此产出 `Deny("Invalid arguments: …")` 回流模型自纠（P2）。静默钳制会把模型的错误从它自己眼前藏起来。
+- `sys_time_read` 的描述里显式要求"先调用它再回答任何 today/now 问题、再构造其它工具的 epochMs"——这是让模型真正用起来的关键，不能只靠工具名。
+- `sys_app_list` 的描述显式指向 `sys_app_open`（"先查包名再打开"），把两个工具串成模型能照做的顺序。
 
 ---
 
@@ -216,24 +264,34 @@ interface SystemOperationRouter {
 | ~~Phase 1~~ | 统一数据模型 + `SystemCapabilityProbe` + `SystemIntentExecutor` + `SystemOperationRouter` + `SystemOperationToolFactory` | **✅ 已实现**（2026-08-30，JVM 单测 26 项通过；Manifest 权限已声明） |
 | ~~Phase 2~~ | `AppFunctionBridge` + Schema Adapter | **❌ 取消**（门禁不可得 + 工具链升级成本，评审结论 v1.1） |
 | Phase 3 | Automation 兜底（Accessibility；Shizuku 已否决） | **⏸ 延后未排期**；回归时恢复 HIGH_RISK 与 §5.4 契约 |
+| ~~Phase 4~~ | v1.2 读侧工具六个 + P4 权限申请缝 | **✅ 已实现**（2026-09-11；JVM 单测 154 项通过，含 `TimeCalculationTest` 22 项日期数学） |
 
-依赖项：**零新增**（复用 kotlinx-serialization / coroutines / androidx.core；未引入 shizuku、kotlinx-datetime）。
+依赖项：**零新增**（复用 kotlinx-serialization / coroutines / androidx.core；未引入 shizuku、kotlinx-datetime、play-services）。定位与反向地理编码均走框架 `LocationManager` / `Geocoder`。
+
+> **Phase 4 尚未真机验证**：本仓库唯一自动化门禁是 JVM 单测，`READ_CALENDAR` / 定位 / 电量广播 / `Geocoder` 后端等依赖真实平台实现的路径只做到编译通过 + 逻辑单测，instrumented 用例见 §8.2 欠账池。
 
 ---
 
 ## 8. 验收测试计划
 
 1. **模型与路由（JVM 单测）✅ 已落地**
-   - `OperationSpecDangerLevelTest`：`CalendarInsertSpec` 双模式等级切换、各 Spec 静态等级
-   - `SystemOperationRouterTest`：7 类 Spec 分发正确性；异常归一（SystemOperation → Failed / 未知异常 → Failed / 超时 → Timeout）；Success 计时盖章；探测透传
+   - `OperationSpecDangerLevelTest`：`CalendarInsertSpec` 双模式等级切换、各 Spec 静态等级、v1.2 读侧等级按数据归属分档、读工具默认值保守性（`includeAddress=false`）
+   - `SystemOperationRouterTest`：13 类 Spec 分发正确性；异常归一（SystemOperation → Failed / 未知异常 → Failed / 超时 → Timeout）；Success 计时盖章；探测透传；**v1.2 新增**：读工具同样吃超时与异常归一（防"读操作旁路 Router"的回潮）
    - `LaunchPolicyTest`：C4 决策矩阵全分支（前台直启 / SAW 直启 / 通知兜底 / FOREGROUND_NOW 显式拒绝）
    - `SystemCapabilityProbeTest`：快照与冷流重估语义
-   - `SystemOperationToolFactoryTest`：7 工具目录 / 等级 / Schema 形状 / 参数解析往返 / 未知键容忍 / 未知工具与缺字段失败
+   - `SystemOperationToolFactoryTest`：13 工具目录 / 等级 / **每个 Schema 闭合且逐属性有描述** / 参数解析往返 / 空参数走默认值 / 越界参数在解析期失败且报错可行动 / 未知键容忍 / 未知工具与缺字段失败
+   - **`TimeCalculationTest`（v1.2）**：日期数学钉死在 `Asia/Shanghai` 与固定基准瞬间，不随构建机时区漂移。覆盖正负偏移、严格向后的 weekday 吸附（周五当天问"下周五"必须落到 +7 天）、`timeOfDay` 在偏移之后应用、月末/闰年钳制（1/31+1 月=2/28、2/29+1 年=2/28）、显式 `baseEpochMs` 覆盖"现在"、非法输入失败而非猜测
+   - **`PermissionCoordinatorTest`（v1.2）**：挂起→回灌→清理；**取消（含 Router 超时）必须清空挂起态**，否则幽灵弹窗会串到下一次无关运行；迟到的授权结果必须是 no-op；`asRequester()` 适配形状
 2. **Intent 路径（instrumented，待真机/模拟器）**
    - 前台读剪贴板成功；后台（无焦点）读 → `SecurityBlocked` 且 reason == "Background clipboard read restricted"（P2 回归锚点）
    - 无匹配包名 → `TargetNotFound`；未授权通知 → `PermissionRequired`
    - 后台发 DeepLink（无 SAW）→ 通知兜底且 `deliveredVia=notification`
    - 日历 EDITOR_INTENT 拉起编辑页；DIRECT_WRITE 权限缺失 → `PermissionRequired`
+3. **v1.2 读侧（instrumented，待真机/模拟器 — 尚未验证）**
+   - `sys_time_read` / `sys_time_calc` / `sys_device_read`：无权限依赖，可直接断言字段齐全与 epochMs 可被 `sys_calendar_insert` 复用
+   - `sys_calendar_query`：授权后能读到事件、周期事件按发生次展开；拒绝授权 → `PermissionRequired`
+   - `sys_location_read`：设备"位置"总开关关闭 → `SecurityBlocked`（**不得**与 `PermissionRequired` 混淆，C9）；只授予"大致位置"时 `precisionDegraded` 出现；无 Geocoder 后端的 ROM 上 `includeAddress=true` 仍返回有效坐标 + `addressUnavailable`
+   - 权限自愈闭环：未授予时调用 → 系统弹窗出现 → 允许后**同一次调用**直接返回成功，而不是先失败再让模型重试一遍
 
 ---
 

@@ -64,6 +64,9 @@ interface AgentRuntimeOwner {
 class AgentViewModel(
     private val owner: AgentRuntimeOwner,
     val approvalCoordinator: ApprovalCoordinator,
+    /** Must be the same instance the AppContainer wired into the executor — a private copy
+     * would leave every permission request hanging until the router timeout. */
+    val permissionCoordinator: PermissionCoordinator,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : ViewModel() {
 
@@ -82,6 +85,9 @@ class AgentViewModel(
 
     /** HITL 挂起请求（Q1）；非空时 UI 显示审批对话框。 */
     val approval = approvalCoordinator.pending
+
+    /** 挂起的运行时权限请求（v1.2）；非空时 UI 触发系统授权弹窗。 */
+    val permission = permissionCoordinator.pending
 
     private var runJob: Job? = null
 
@@ -199,6 +205,11 @@ class AgentViewModel(
 
     fun respondApproval(allowed: Boolean) {
         approvalCoordinator.respond(allowed)
+    }
+
+    /** 系统授权弹窗结果回灌（v1.2）。执行器仍会复查权限，这里只报告"用户做了什么选择"。 */
+    fun respondPermission(granted: Boolean) {
+        permissionCoordinator.respond(granted)
     }
 
     // ----- 服务商 / 模型选择 -----

@@ -2,17 +2,25 @@ package com.yangz3720.simplywork.infrastructure.systemops
 
 import com.yangz3720.simplywork.infrastructure.error.InfrastructureException
 import com.yangz3720.simplywork.infrastructure.systemops.intent.SystemIntentExecutor
+import com.yangz3720.simplywork.infrastructure.systemops.model.AppListSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.AppOpenSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.CalendarInsertSpec
+import com.yangz3720.simplywork.infrastructure.systemops.model.CalendarQuerySpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.CalendarWriteMode
 import com.yangz3720.simplywork.infrastructure.systemops.model.ClipboardReadSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.ClipboardWriteSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.DeepLinkSpec
+import com.yangz3720.simplywork.infrastructure.systemops.model.DeviceReadSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.LaunchContext
+import com.yangz3720.simplywork.infrastructure.systemops.model.LocationAccuracy
+import com.yangz3720.simplywork.infrastructure.systemops.model.LocationReadSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.NotificationPostSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.OperationSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.ShareTextSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.SystemOperationResult
+import com.yangz3720.simplywork.infrastructure.systemops.model.TimeUnit
+import com.yangz3720.simplywork.infrastructure.systemops.model.TimeCalcSpec
+import com.yangz3720.simplywork.infrastructure.systemops.model.TimeReadSpec
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
@@ -44,11 +52,21 @@ class SystemOperationRouterTest {
         coEvery { executor.insertCalendarEvent(any()) } returns clipboardSuccess
         coEvery { executor.postNotification(any()) } returns clipboardSuccess
         coEvery { executor.shareText("t", "c") } returns clipboardSuccess
+        coEvery { executor.readCurrentTime() } returns clipboardSuccess
+        coEvery { executor.calculateTime(any()) } returns clipboardSuccess
+        coEvery { executor.readDeviceInfo() } returns clipboardSuccess
+        coEvery { executor.listInstalledApps(any()) } returns clipboardSuccess
+        coEvery { executor.queryCalendarEvents(any()) } returns clipboardSuccess
+        coEvery { executor.readLocation(any()) } returns clipboardSuccess
 
         val calendar = CalendarInsertSpec(
             title = "e", startTimeEpochMs = 0, endTimeEpochMs = 1, mode = CalendarWriteMode.EDITOR_INTENT
         )
         val notification = NotificationPostSpec("ch", "t", "m")
+        val timeCalc = TimeCalcSpec(amount = 3, unit = TimeUnit.DAY)
+        val appList = AppListSpec(limit = 5)
+        val calendarQuery = CalendarQuerySpec(limit = 3)
+        val location = LocationReadSpec(accuracy = LocationAccuracy.PRECISE)
 
         val specs: List<Pair<OperationSpec, suspend (OperationSpec) -> SystemOperationResult>> = listOf(
             DeepLinkSpec("https://x") to { router.execute(it) },
@@ -57,9 +75,15 @@ class SystemOperationRouterTest {
             ClipboardWriteSpec("l", "t") to { router.execute(it) },
             calendar to { router.execute(it) },
             notification to { router.execute(it) },
-            ShareTextSpec("t", "c") to { router.execute(it) }
+            ShareTextSpec("t", "c") to { router.execute(it) },
+            TimeReadSpec to { router.execute(it) },
+            timeCalc to { router.execute(it) },
+            DeviceReadSpec to { router.execute(it) },
+            appList to { router.execute(it) },
+            calendarQuery to { router.execute(it) },
+            location to { router.execute(it) }
         )
-        specs.forEach { (spec, call) -> assertEquals(clipboardSuccess, call(spec)) }
+        specs.forEach { (spec, call) -> assertEquals("$spec", clipboardSuccess, call(spec)) }
 
         coVerify(exactly = 1) { executor.launchDeepLink("https://x", LaunchContext.AUTO) }
         coVerify(exactly = 1) { executor.openApp("com.a") }
@@ -68,6 +92,32 @@ class SystemOperationRouterTest {
         coVerify(exactly = 1) { executor.insertCalendarEvent(calendar) }
         coVerify(exactly = 1) { executor.postNotification(notification) }
         coVerify(exactly = 1) { executor.shareText("t", "c") }
+        coVerify(exactly = 1) { executor.readCurrentTime() }
+        coVerify(exactly = 1) { executor.calculateTime(timeCalc) }
+        coVerify(exactly = 1) { executor.readDeviceInfo() }
+        coVerify(exactly = 1) { executor.listInstalledApps(appList) }
+        coVerify(exactly = 1) { executor.queryCalendarEvents(calendarQuery) }
+        coVerify(exactly = 1) { executor.readLocation(location) }
+    }
+
+    /**
+     * The v1.2 read tools are dispatched like everything else, so they inherit the router's
+     * timeout + exception normalization. Guards against a future "reads can skip the router"
+     * shortcut that would silently drop both.
+     */
+    @Test
+    fun testReadToolsAlsoGetTimeoutAndNormalization() = runTest {
+        coEvery { executor.readLocation(any()) } coAnswers { delay(500); SystemOperationResult.Success() }
+        val timedOut = router.execute(LocationReadSpec(), timeoutMs = 100)
+        assertTrue("expected Timeout but was $timedOut", timedOut is SystemOperationResult.Timeout)
+
+        coEvery { executor.queryCalendarEvents(any()) } throws
+            InfrastructureException.SystemOperation.CalendarQueryFailed("provider died")
+        val failed = router.execute(CalendarQuerySpec())
+        assertEquals(
+            SystemOperationResult.Failed(message = "Calendar query failed: provider died", cause = null),
+            failed
+        )
     }
 
     @Test

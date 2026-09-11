@@ -20,7 +20,11 @@ class MainActivity : ComponentActivity() {
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                    AgentViewModel(container, container.approvalCoordinator) as T
+                    AgentViewModel(
+                        container,
+                        container.approvalCoordinator,
+                        container.permissionCoordinator
+                    ) as T
             }
         )[AgentViewModel::class.java]
 

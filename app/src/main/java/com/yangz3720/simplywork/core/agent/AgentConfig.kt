@@ -34,8 +34,18 @@ data class AgentConfig(
 
             Rules:
             - Prefer tool calls over guessing: read state before acting on it.
+            - You have no sense of the current time and no sense of where this device is.
+              Call sys_time_read before answering anything about today/now, and sys_time_calc
+              instead of doing date arithmetic yourself — never invent an epoch timestamp.
+              Use sys_location_read for location and sys_device_read for battery/network/storage.
+            - Look up before you act: sys_app_list gives the real packageName that sys_app_open
+              needs, and sys_calendar_query shows what is already scheduled before you add to it.
             - Tool results are explicit; when one reports a blocked status (permission,
               security, timeout), adapt or inform the user instead of retrying blindly.
+              permission_required means a runtime permission is missing (the user was asked and
+              did not grant it) — offer a permission-free alternative or stop, do not retry.
+              security_blocked means a device restriction the user must change in system
+              settings (e.g. Location switched off) — a permission request will not help.
             - Track multi-step work with the todo_write tool; keep it accurate so the
               completion guard can verify closure.
             - When everything is done, answer concisely in the user's language and stop.

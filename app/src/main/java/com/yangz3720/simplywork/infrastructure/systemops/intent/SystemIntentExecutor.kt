@@ -1,12 +1,16 @@
 package com.yangz3720.simplywork.infrastructure.systemops.intent
 
+import com.yangz3720.simplywork.infrastructure.systemops.model.AppListSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.CalendarInsertSpec
+import com.yangz3720.simplywork.infrastructure.systemops.model.CalendarQuerySpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.ClipboardWriteSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.DeepLinkSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.LaunchContext
+import com.yangz3720.simplywork.infrastructure.systemops.model.LocationReadSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.NotificationPostSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.ShareTextSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.SystemOperationResult
+import com.yangz3720.simplywork.infrastructure.systemops.model.TimeCalcSpec
 
 /**
  * Intent main path executor (v1.1: the ONLY execution path).
@@ -54,4 +58,32 @@ interface SystemIntentExecutor {
 
     /** Open the system share sheet for text content (follows the same C4 launch policy). */
     suspend fun shareText(title: String, content: String): SystemOperationResult
+
+    // ----- read-side operations (v1.2) -----
+
+    /** Current device date, time, weekday and zone. Always succeeds — no permission, no I/O. */
+    suspend fun readCurrentTime(): SystemOperationResult
+
+    /** Resolve a relative date/time against [readCurrentTime]. Pure arithmetic; never touches the device. */
+    suspend fun calculateTime(spec: TimeCalcSpec): SystemOperationResult
+
+    /** Battery / network / storage / memory / build snapshot. */
+    suspend fun readDeviceInfo(): SystemOperationResult
+
+    /** Installed-app catalog (package name + label) to make `openApp` targetable. */
+    suspend fun listInstalledApps(spec: AppListSpec): SystemOperationResult
+
+    /**
+     * Read calendar events in a window. Missing READ_CALENDAR first goes through the injected
+     * [SystemPermissionRequester][com.yangz3720.simplywork.infrastructure.systemops.SystemPermissionRequester]
+     * (P4: the UI performs the grant); a refusal or a still-missing permission → PermissionRequired.
+     */
+    suspend fun queryCalendarEvents(spec: CalendarQuerySpec): SystemOperationResult
+
+    /**
+     * Device location via the framework `LocationManager` (no Play Services dependency).
+     * Same permission-request contract as [queryCalendarEvents]. When every provider is
+     * switched off the result is SecurityBlocked, not an empty coordinate.
+     */
+    suspend fun readLocation(spec: LocationReadSpec): SystemOperationResult
 }

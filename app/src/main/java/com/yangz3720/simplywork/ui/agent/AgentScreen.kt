@@ -1,5 +1,7 @@
 package com.yangz3720.simplywork.ui.agent
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -63,6 +65,21 @@ fun AgentScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     val approval by viewModel.approval.collectAsState()
+    val permission by viewModel.permission.collectAsState()
+
+    // v1.2 / P4：运行时权限的申请落点。基础设施只报告缺哪些权限，弹窗时机与形态归 UI。
+    // 结果回灌后执行器会复查权限再决定是否放行工具，所以"用户点了允许"不等于授权成功。
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        viewModel.respondPermission(results.isNotEmpty() && results.values.all { it })
+    }
+
+    LaunchedEffect(permission) {
+        permission?.let { request ->
+            permissionLauncher.launch(request.permissions.toTypedArray())
+        }
+    }
 
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()

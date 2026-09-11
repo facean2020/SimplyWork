@@ -157,7 +157,7 @@ class AgentViewModelTest {
     )
 
     private fun viewModel(runtime: AgentRuntime): AgentViewModel =
-        AgentViewModel(FakeOwner(runtime), ApprovalCoordinator())
+        AgentViewModel(FakeOwner(runtime), ApprovalCoordinator(), PermissionCoordinator())
 
     /** 真实时间轮询：等待谓词成立或超时。 */
     private fun waitFor(timeoutMs: Long = 8000, predicate: () -> Boolean) {
@@ -277,7 +277,7 @@ class AgentViewModelTest {
     @Test
     fun `selectModel applies selection through owner and updates state`() {
         val owner = FakeOwner(null)
-        val vm = AgentViewModel(owner, ApprovalCoordinator())
+        val vm = AgentViewModel(owner, ApprovalCoordinator(), PermissionCoordinator())
         Thread.sleep(100) // init 完成后状态稳定
 
         vm.selectModel("deepseek", "  deepseek-chat  ")
@@ -290,7 +290,7 @@ class AgentViewModelTest {
     @Test
     fun `selectModel is rejected while running`() {
         val owner = FakeOwner(buildRuntime(HangingProvider()))
-        val vm = AgentViewModel(owner, ApprovalCoordinator())
+        val vm = AgentViewModel(owner, ApprovalCoordinator(), PermissionCoordinator())
 
         vm.send("hi")
         waitFor { vm.uiState.value.running }
@@ -304,7 +304,7 @@ class AgentViewModelTest {
     @Test
     fun `fetchModels delegates to owner with account`() = kotlinx.coroutines.runBlocking {
         val owner = FakeOwner(null)
-        val vm = AgentViewModel(owner, ApprovalCoordinator())
+        val vm = AgentViewModel(owner, ApprovalCoordinator(), PermissionCoordinator())
         val account = ProviderAccount(id = "openrouter", name = "OpenRouter", baseUrl = "https://openrouter.ai/api/v1")
 
         val result = vm.fetchModels(account)

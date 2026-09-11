@@ -58,6 +58,15 @@ data class ApprovalRequest(
 )
 
 /**
+ * 运行时权限申请请求（`SystemPermissionRequester` 的 UI 侧投影，v1.2 / P4）：
+ * 基础设施只报告缺哪些权限与理由，弹什么、何时弹由 UI 层决定。
+ */
+data class PermissionRequest(
+    val permissions: List<String>,
+    val rationale: String
+)
+
+/**
  * One screen of the agent UI: conversation projection + run state + sessions.
  * MVI 单一状态（architecture.md `AgentViewModel`）。
  */

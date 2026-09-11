@@ -1,17 +1,27 @@
 package com.yangz3720.simplywork.infrastructure.systemops.tool
 
 import com.yangz3720.simplywork.infrastructure.model.model.ToolDefinition
+import com.yangz3720.simplywork.infrastructure.systemops.model.AppListSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.AppOpenSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.CalendarInsertSpec
+import com.yangz3720.simplywork.infrastructure.systemops.model.CalendarQuerySpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.CalendarWriteMode
 import com.yangz3720.simplywork.infrastructure.systemops.model.ClipboardReadSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.ClipboardWriteSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.DeepLinkSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.DangerLevel
+import com.yangz3720.simplywork.infrastructure.systemops.model.DeviceReadSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.LaunchContext
+import com.yangz3720.simplywork.infrastructure.systemops.model.LocationAccuracy
+import com.yangz3720.simplywork.infrastructure.systemops.model.LocationReadSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.NotificationPostSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.OperationSpec
 import com.yangz3720.simplywork.infrastructure.systemops.model.ShareTextSpec
+import com.yangz3720.simplywork.infrastructure.systemops.model.TimeUnit
+import com.yangz3720.simplywork.infrastructure.systemops.model.TimeCalcSpec
+import com.yangz3720.simplywork.infrastructure.systemops.model.TimeCalculation
+import com.yangz3720.simplywork.infrastructure.systemops.model.TimeReadSpec
+import com.yangz3720.simplywork.infrastructure.systemops.model.Weekday
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -47,6 +57,19 @@ object SystemOperationToolFactory {
     const val TOOL_NOTIFY_POST = "sys_notify_post"
     const val TOOL_SHARE_TEXT = "sys_share_text"
 
+    // v1.2 read-side tools.
+    const val TOOL_TIME_READ = "sys_time_read"
+    const val TOOL_TIME_CALC = "sys_time_calc"
+    const val TOOL_DEVICE_READ = "sys_device_read"
+    const val TOOL_APP_LIST = "sys_app_list"
+    const val TOOL_CALENDAR_QUERY = "sys_calendar_query"
+    const val TOOL_LOCATION_READ = "sys_location_read"
+
+    /** Parser-enforced ceilings: a model-invented huge limit is rejected, never silently clamped. */
+    private const val MAX_APP_LIMIT = 300
+    private const val MAX_CALENDAR_EVENTS = 100
+    private const val MAX_LOCATION_AGE_SECONDS = 24 * 60 * 60
+
     private val json = Json { ignoreUnknownKeys = true }
 
     fun toolEntries(): List<SystemToolEntry> = ENTRIES
@@ -73,8 +96,46 @@ object SystemOperationToolFactory {
         TOOL_CLIPBOARD_WRITE to { j, o -> j.decode(ClipboardWriteSpec.serializer(), o) },
         TOOL_CALENDAR_INSERT to { j, o -> j.decode(CalendarInsertSpec.serializer(), o) },
         TOOL_NOTIFY_POST to { j, o -> j.decode(NotificationPostSpec.serializer(), o) },
-        TOOL_SHARE_TEXT to { j, o -> j.decode(ShareTextSpec.serializer(), o) }
+        TOOL_SHARE_TEXT to { j, o -> j.decode(ShareTextSpec.serializer(), o) },
+        TOOL_TIME_READ to { _, _ -> TimeReadSpec },
+        TOOL_TIME_CALC to { j, o ->
+            j.decode(TimeCalcSpec.serializer(), o).also { spec ->
+                TimeCalculation.validate(spec)?.let { throw IllegalArgumentException(it) }
+            }
+        },
+        TOOL_DEVICE_READ to { _, _ -> DeviceReadSpec },
+        TOOL_APP_LIST to { j, o ->
+            j.decode(AppListSpec.serializer(), o).also {
+                guard(it.limit in 1..MAX_APP_LIMIT, "limit must be between 1 and $MAX_APP_LIMIT")
+            }
+        },
+        TOOL_CALENDAR_QUERY to { j, o ->
+            j.decode(CalendarQuerySpec.serializer(), o).also {
+                guard(it.limit in 1..MAX_CALENDAR_EVENTS, "limit must be between 1 and $MAX_CALENDAR_EVENTS")
+                guard(
+                    it.startTimeEpochMs == null || it.endTimeEpochMs == null || it.startTimeEpochMs < it.endTimeEpochMs,
+                    "startTimeEpochMs must be earlier than endTimeEpochMs"
+                )
+            }
+        },
+        TOOL_LOCATION_READ to { j, o ->
+            j.decode(LocationReadSpec.serializer(), o).also {
+                guard(
+                    it.maxAgeSeconds in 0..MAX_LOCATION_AGE_SECONDS,
+                    "maxAgeSeconds must be between 0 and $MAX_LOCATION_AGE_SECONDS"
+                )
+            }
+        }
     )
+
+    /**
+     * Throws to fail the parse: the audit gate turns this into a `Deny("Invalid arguments: …")`
+     * that the model reads and self-corrects from (P2), which is why bounds live here rather
+     * than being silently clamped at execution time.
+     */
+    private fun guard(condition: Boolean, message: String) {
+        if (!condition) throw IllegalArgumentException(message)
+    }
 
     private fun <T> Json.decode(serializer: KSerializer<T>, element: JsonObject): T =
         decodeFromJsonElement(serializer, element)
@@ -188,6 +249,105 @@ object SystemOperationToolFactory {
             ),
             dangerLevel = DangerLevel.USER_VISIBLE,
             specKind = ShareTextSpec::class
+        ),
+        // ----- v1.2 read-side tools -----
+        SystemToolEntry(
+            ToolDefinition(
+                name = TOOL_TIME_READ,
+                description = "Read the device clock: current date, time, weekday, timezone and epoch " +
+                    "milliseconds. No parameters. You have no built-in sense of time — call this before " +
+                    "answering any 'today'/'now' question and before building epoch timestamps for other tools.",
+                parametersSchema = objectSchema()
+            ),
+            dangerLevel = DangerLevel.SAFE,
+            specKind = TimeReadSpec::class
+        ),
+        SystemToolEntry(
+            ToolDefinition(
+                name = TOOL_TIME_CALC,
+                description = "Turn a relative expression ('next Friday 3pm', 'in 3 days', 'tomorrow 09:00') " +
+                    "into an absolute epochMs. Steps in order: shift base by amount+unit, then advance strictly " +
+                    "forward to weekday, then overwrite the clock with timeOfDay. Use this instead of doing date " +
+                    "arithmetic yourself.",
+                parametersSchema = objectSchema(
+                    "amount" to integerProp("Signed offset applied to the base, e.g. 3 or -2. Default 0"),
+                    "unit" to enumProp(
+                        TimeUnit.entries.map { it.name },
+                        "Unit for amount (default DAY). MONTH/YEAR clamp the day-of-month (Jan 31 + 1 month = Feb 28)"
+                    ),
+                    "weekday" to enumProp(
+                        Weekday.entries.map { it.name },
+                        "Advance strictly PAST the current day to this weekday (so 'FRIDAY' on a Friday means next Friday). Omit for 'this Friday'."
+                    ),
+                    "timeOfDay" to stringProp("Set the local clock to 24-hour 'HH:mm' after the offset, e.g. '15:00'"),
+                    "baseEpochMs" to integerProp("Anchor instant; defaults to the current device time"),
+                    required = emptyList()
+                )
+            ),
+            dangerLevel = DangerLevel.SAFE,
+            specKind = TimeCalcSpec::class
+        ),
+        SystemToolEntry(
+            ToolDefinition(
+                name = TOOL_DEVICE_READ,
+                description = "Read device state: battery level/charging/status, network connectivity and " +
+                    "transport, storage and memory headroom, uptime, manufacturer/model, Android version, " +
+                    "locale and timezone. No parameters.",
+                parametersSchema = objectSchema()
+            ),
+            dangerLevel = DangerLevel.SAFE,
+            specKind = DeviceReadSpec::class
+        ),
+        SystemToolEntry(
+            ToolDefinition(
+                name = TOOL_APP_LIST,
+                description = "List installed apps as {packageName, label}. Call this before sys_app_open — " +
+                    "app_open needs an exact package name and guessing one returns target_not_found.",
+                parametersSchema = objectSchema(
+                    "query" to stringProp("Case-insensitive filter matched against the display label or package name"),
+                    "limit" to integerProp("Maximum entries to return (1..300), default 40"),
+                    "launchableOnly" to booleanProp("Default true = only apps with a launcher entry; false = every installed package")
+                )
+            ),
+            dangerLevel = DangerLevel.SAFE,
+            specKind = AppListSpec::class
+        ),
+        SystemToolEntry(
+            ToolDefinition(
+                name = TOOL_CALENDAR_QUERY,
+                description = "Read calendar events in a time window (default: the next 7 days from now), " +
+                    "expanding recurring appointments into real occurrences. Returns epochMs plus local ISO " +
+                    "times. Needs READ_CALENDAR; a permission_required result means the user was asked and did not grant it.",
+                parametersSchema = objectSchema(
+                    "startTimeEpochMs" to integerProp("Window start; defaults to the current time"),
+                    "endTimeEpochMs" to integerProp("Window end; defaults to startTimeEpochMs + 7 days"),
+                    "query" to stringProp("Optional case-insensitive substring filter on the event title"),
+                    "limit" to integerProp("Maximum events (1..100), default 20")
+                )
+            ),
+            // Reads the user's private schedule straight out of the provider, so it passes the
+            // HITL gate — unlike calendar INSERT in EDITOR_INTENT mode, which the calendar app confirms.
+            dangerLevel = DangerLevel.USER_CONFIRMING,
+            specKind = CalendarQuerySpec::class
+        ),
+        SystemToolEntry(
+            ToolDefinition(
+                name = TOOL_LOCATION_READ,
+                description = "Read the device location (latitude/longitude + accuracy and age). " +
+                    "Needs the location runtime permission AND device Location switched on; a " +
+                    "security_blocked result means Location is off on the device, not that permission is missing. " +
+                    "Prefer APPROXIMATE unless the task really needs street-level precision.",
+                parametersSchema = objectSchema(
+                    "accuracy" to enumProp(
+                        LocationAccuracy.entries.map { it.name },
+                        "APPROXIMATE (default) uses network/passive providers; PRECISE prefers GPS and needs fine location"
+                    ),
+                    "maxAgeSeconds" to integerProp("How stale a cached fix may be before asking a provider for a fresh one (default 120). A fresh GPS fix can take a long time indoors."),
+                    "includeAddress" to booleanProp("Reverse-geocode to a human address line. Costs an extra lookup and is unavailable on devices without a geocoder backend — the result then carries addressUnavailable.")
+                )
+            ),
+            dangerLevel = DangerLevel.USER_CONFIRMING,
+            specKind = LocationReadSpec::class
         )
     )
 

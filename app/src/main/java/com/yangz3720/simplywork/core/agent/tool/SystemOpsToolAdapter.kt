@@ -19,7 +19,7 @@ object SystemOpsToolAdapter {
 
     private val json = Json { ignoreUnknownKeys = true }
 
-    /** Registers all 7 `sys_*` tools. */
+    /** Registers every `sys_*` tool the factory catalog exposes (13 as of v1.2). */
     fun registerAll(registry: AgentToolRegistry, router: SystemOperationRouter) {
         SystemOperationToolFactory.toolEntries().forEach { entry ->
             registry.register(
