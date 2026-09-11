@@ -1,0 +1,121 @@
+package com.yangz3720.simplywork.core.agent
+
+import com.yangz3720.simplywork.core.agent.tool.AgentToolRegistry
+import com.yangz3720.simplywork.core.session.SessionNode
+import com.yangz3720.simplywork.core.session.SessionNodeType
+import com.yangz3720.simplywork.core.session.SessionRepository
+import com.yangz3720.simplywork.core.session.SystemPromptKind
+import com.yangz3720.simplywork.infrastructure.error.InfrastructureException
+import com.yangz3720.simplywork.infrastructure.model.model.Message
+import com.yangz3720.simplywork.infrastructure.model.model.ModelRequest
+import kotlinx.serialization.json.jsonPrimitive
+
+/**
+ * "Convert format" step (flow node F): active path + State Memory → [ModelRequest]
+ * (agent-core-design.md §5, §6 step ⑥).
+ *
+ * Injection order (top-down):
+ * 1. System message: base system prompt + skill fragment + State Memory block (forced, every loop)
+ * 2. Episode summaries (Summary nodes) as System messages
+ * 3. All remaining nodes in chronological order (working memory + not-yet-compacted rounds)
+ *
+ * Pairing repair: an Assistant message with tool calls must be followed by one Tool
+ * message per call id (OpenAI-compatible APIs enforce this). Missing pairs — e.g. a
+ * crash between ToolCall and ToolResult before the resume cleanup could run — get a
+ * synthetic error Tool message injected here, so the request is always valid.
+ */
+class AgentContextAssembler(
+    private val repository: SessionRepository,
+    private val registry: AgentToolRegistry,
+    private val config: AgentConfig,
+    private val skillInjector: SkillInjector = SkillInjector.None
+) {
+
+    suspend fun assemble(sessionId: String, path: List<SessionNode>): ModelRequest {
+        val state = repository.loadState(sessionId)
+        val systemText = buildString {
+            append(config.systemPrompt)
+            skillInjector.promptFragment()?.takeIf { it.isNotBlank() }?.let {
+                append("\n\n")
+                append(it)
+            }
+            append("\n\n")
+            append(state.toPromptBlock())
+        }
+
+        val messages = ArrayList<Message>(path.size + 1)
+        messages.add(Message.System(content = systemText))
+
+        for (node in path) {
+            when (node.nodeType) {
+                SessionNodeType.SystemPrompt -> {
+                    // Base system prompt is represented by the injected system message;
+                    // follow-ups are re-injected as user-role instructions.
+                    val payload = repository.payload(node)
+                    val kind = payload["kind"]?.jsonPrimitive?.content
+                    if (kind == SystemPromptKind.follow_up.name) {
+                        val text = payload["text"]?.jsonPrimitive?.content.orEmpty()
+                        messages.add(Message.User(content = "[system follow-up] $text"))
+                    }
+                }
+                else -> nodeToMessage(node)?.let(messages::add)
+            }
+        }
+
+        return ModelRequest(
+            messages = repairToolPairing(messages),
+            tools = registry.definitions()
+        )
+    }
+
+    /** Node → conversation message; null = node contributes no message (skipped defensively). */
+    private suspend fun nodeToMessage(node: SessionNode): Message? = try {
+        val payload = repository.payload(node)
+        when (node.nodeType) {
+            SessionNodeType.UserPrompt -> NodePayloads.decodeMessage(payload) as? Message.User
+            SessionNodeType.Steer -> Message.User(content = "[steering] ${payload["text"]?.jsonPrimitive?.content.orEmpty()}")
+            SessionNodeType.ToolCall -> NodePayloads.decodeMessage(payload) as? Message.Assistant
+            SessionNodeType.ToolResult -> NodePayloads.decodeMessage(payload) as? Message.ToolResult
+            SessionNodeType.Summary -> Message.System(
+                content = "Summary of earlier conversation (episode memory):\n${payload["text"]?.jsonPrimitive?.content.orEmpty()}"
+            )
+            SessionNodeType.SystemPrompt -> null
+        }
+    } catch (_: InfrastructureException.Session) {
+        null // payload missing/corrupt: skip the node rather than break the request (logged upstream)
+    }
+
+    /** Ensures every assistant tool call has a matching Tool message directly after it. */
+    private fun repairToolPairing(messages: List<Message>): List<Message> {
+        val repaired = ArrayList<Message>(messages.size)
+        var i = 0
+        while (i < messages.size) {
+            val message = messages[i]
+            repaired.add(message)
+            if (message is Message.Assistant && message.toolCalls.isNotEmpty()) {
+                i++
+                val expected = message.toolCalls.map { it.id }.toMutableSet()
+                while (i < messages.size && messages[i] is Message.ToolResult) {
+                    val tool = messages[i] as Message.ToolResult
+                    expected.remove(tool.toolCallId)
+                    repaired.add(tool)
+                    i++
+                }
+                // Missing results (crash between ToolCall and ToolResult) → synthetic error tool messages.
+                expected.forEach { callId ->
+                    repaired.add(
+                        Message.ToolResult(
+                            toolCallId = callId,
+                            toolName = "unknown",
+                            content = "No result was produced for this tool call (interrupted).",
+                            isError = true
+                        )
+                    )
+                }
+                continue
+            }
+            i++
+        }
+        return repaired
+    }
+}

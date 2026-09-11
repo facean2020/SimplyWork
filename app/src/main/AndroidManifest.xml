@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- systemops: notification posting + C4 notification fallback (runtime, C5) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- systemops: calendar DIRECT_WRITE mode only (runtime; EDITOR_INTENT needs none) -->
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="android.permission.WRITE_CALENDAR" />
+    <!-- systemops: C4 background activity launch exemption when granted via Settings -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- Model provider traffic (OpenAI-compatible HTTP): normal permission, auto-granted.
+         NOTE: was missing until 2026-09-10 — first real network call (listModels) crashed
+         with SecurityException because OkHttp rethrows non-IOException to the pool thread. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Sideloading distribution: skip per-<queries> package-visibility whack-a-mole for
+         resolveActivity / getLaunchIntentForPackage against arbitrary targets. -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
+    <application
+        android:name=".SimplyWorkApp"
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.SimplyWork">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.SimplyWork"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>
