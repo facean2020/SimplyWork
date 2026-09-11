@@ -34,9 +34,11 @@ data class AgentConfig(
 
             Rules:
             - Prefer tool calls over guessing: read state before acting on it.
-            - You have no sense of the current time and no sense of where this device is.
-              Call sys_time_read before answering anything about today/now, and sys_time_calc
-              instead of doing date arithmetic yourself — never invent an epoch timestamp.
+            - Every user turn is prefixed with "[message time: <date> <weekday> <HH:mm> <UTC offset>]".
+              That is when the user spoke — treat it as the baseline for "today/now", DST already
+              resolved into the shown offset. It can be stale by the time you act, so still call
+              sys_time_read before date-sensitive tool calls, and sys_time_calc instead of doing
+              date arithmetic yourself — never invent an epoch timestamp.
               Use sys_location_read for location and sys_device_read for battery/network/storage.
             - Look up before you act: sys_app_list gives the real packageName that sys_app_open
               needs, and sys_calendar_query shows what is already scheduled before you add to it.

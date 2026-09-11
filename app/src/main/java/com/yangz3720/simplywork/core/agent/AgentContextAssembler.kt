@@ -9,6 +9,10 @@ import com.yangz3720.simplywork.infrastructure.error.InfrastructureException
 import com.yangz3720.simplywork.infrastructure.model.model.Message
 import com.yangz3720.simplywork.infrastructure.model.model.ModelRequest
 import kotlinx.serialization.json.jsonPrimitive
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 /**
  * "Convert format" step (flow node F): active path + State Memory → [ModelRequest]
@@ -72,7 +76,15 @@ class AgentContextAssembler(
     private suspend fun nodeToMessage(node: SessionNode): Message? = try {
         val payload = repository.payload(node)
         when (node.nodeType) {
-            SessionNodeType.UserPrompt -> NodePayloads.decodeMessage(payload) as? Message.User
+            SessionNodeType.UserPrompt -> {
+                val user = NodePayloads.decodeMessage(payload) as? Message.User
+                    ?: return null
+                // Per-turn time anchor (v1.2): exactly one human-readable line per user turn —
+                // not per node. A wall-clock stamp is what the model can reason with ("昨天",
+                // "本周五"); raw epoch ms is not. Zone rules resolve DST into the printed
+                // offset, so no local DST knowledge is needed anywhere in the pipeline.
+                Message.User(content = "[message time: ${turnTime(node.createdAt)}]\n${user.content}")
+            }
             SessionNodeType.Steer -> Message.User(content = "[steering] ${payload["text"]?.jsonPrimitive?.content.orEmpty()}")
             SessionNodeType.ToolCall -> NodePayloads.decodeMessage(payload) as? Message.Assistant
             SessionNodeType.ToolResult -> NodePayloads.decodeMessage(payload) as? Message.ToolResult
@@ -83,6 +95,14 @@ class AgentContextAssembler(
         }
     } catch (_: InfrastructureException.Session) {
         null // payload missing/corrupt: skip the node rather than break the request (logged upstream)
+    }
+
+    /** "2025-06-12 Thu 14:35 UTC+08:00" — wall clock on purpose; the model thinks in dates, not epoch. */
+    private fun turnTime(epochMs: Long): String {
+        val zdt = Instant.ofEpochMilli(epochMs).atZone(ZoneId.systemDefault())
+        val stamp = zdt.format(DateTimeFormatter.ofPattern("yyyy-MM-dd EEE HH:mm", Locale.ENGLISH))
+        val offset = zdt.offset.id.let { if (it == "Z") "+00:00" else it }
+        return "$stamp UTC$offset"
     }
 
     /** Ensures every assistant tool call has a matching Tool message directly after it. */

@@ -6,7 +6,13 @@ import com.yangz3720.simplywork.infrastructure.model.model.ToolDefinition
 import com.yangz3720.simplywork.infrastructure.systemops.model.DangerLevel
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -103,17 +109,46 @@ class AuditGatePipelineTest {
     }
 
     @Test
-    fun `post-tool gate sanitizes and truncates with explicit marker`() {
+    fun `post-tool gate keeps oversized results valid JSON and declares the cut`() {
         val gate = AuditGatePipeline(
             AgentToolRegistry(),
             sanitizer = { it.uppercase() },
             maxToolResultChars = 10
         )
         assertEquals("""{"A":1}""", gate.postToolProcess(buildJsonObject { put("a", 1) }))
+
+        // S6: a byte-cut would hand the model invalid JSON. The JSON-aware path must
+        // produce something that still parses, with the cut declared inside the payload.
         val long = buildJsonObject { put("k", "y".repeat(50)) }
         val out = gate.postToolProcess(long)
-        // prefix(10) + explicit truncation marker with the exact dropped count
-        assertTrue(out.startsWith("""{"K":"YYYY"""))
-        assertTrue(out.endsWith("[truncated 48 chars]"))
+        assertTrue(out.length <= 10)
+        val element = Json.parseToJsonElement(out)
+        assertTrue(element.jsonPrimitive.content.endsWith("…[cut]"))
+
+        // An oversized nested array keeps a leading prefix plus a note item instead of
+        // losing parseability — the shape a busy sys_calendar_query result has.
+        val big = buildJsonObject {
+            put("count", 40)
+            put("events", buildJsonArray {
+                repeat(40) { n -> add(buildJsonObject { put("i", n); put("t", "event $n") }) }
+            })
+        }
+        val arrayGate = AuditGatePipeline(AgentToolRegistry(), maxToolResultChars = 300)
+        val arrayOut = arrayGate.postToolProcess(big)
+        val parsed = Json.parseToJsonElement(arrayOut).jsonObject
+        val events = parsed["events"]!!.jsonArray
+        assertTrue(events.size < 40)
+        assertTrue(events.last().jsonObject.containsKey("_truncated"))
+    }
+
+    @Test
+    fun `post-tool gate falls back to byte-cut when sanitizer breaks the JSON`() {
+        val mangler = AuditGatePipeline(
+            AgentToolRegistry(),
+            sanitizer = { it.repeat(3) },
+            maxToolResultChars = 20
+        )
+        val out = mangler.postToolProcess(buildJsonObject { put("a", 1) })
+        assertTrue(out.endsWith("[truncated 1 chars]"))
     }
 }

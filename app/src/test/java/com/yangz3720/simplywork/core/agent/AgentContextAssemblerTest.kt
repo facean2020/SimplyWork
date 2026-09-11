@@ -69,6 +69,25 @@ class AgentContextAssemblerTest {
     }
 
     @Test
+    fun `user turns carry a human-readable time anchor`() = runTest {
+        val sid = repository.createSession("t").id
+        val base = appendNode(sid, null, SessionNodeType.SystemPrompt, """{"kind":"base","text":"BASE"}""")
+        val prompt = appendNode(sid, base.id, SessionNodeType.UserPrompt, """{"type":"user","content":"hello"}""")
+        appendNode(sid, prompt.id, SessionNodeType.ToolCall, """{"type":"assistant","content":null,"toolCalls":[{"id":"c2","name":"fake_tool","argumentsJson":"{}"}]}""")
+
+        val messages = assembler.assemble(sid, repository.activePath(sid)).messages
+
+        // v1.2: exactly one wall-clock line per user turn (never per node, never epoch ms),
+        // DST already resolved into the printed UTC offset.
+        val user = messages.filterIsInstance<Message.User>().first()
+        assertTrue(user.content.startsWith("[message time: "))
+        assertTrue(Regex("""\[message time: \d{4}-\d{2}-\d{2} \w{3} \d{2}:\d{2} UTC[+-]\d{2}:\d{2}]""").containsMatchIn(user.content))
+        assertTrue(user.content.endsWith("\nhello"))
+        val assistant = messages.filterIsInstance<Message.Assistant>().single()
+        assertTrue(!assistant.content.orEmpty().contains("message time"))
+    }
+
+    @Test
     fun `steer and follow_up and summary map per design`() = runTest {
         val sid = repository.createSession("t").id
         val base = appendNode(sid, null, SessionNodeType.SystemPrompt, """{"kind":"base","text":"BASE"}""")

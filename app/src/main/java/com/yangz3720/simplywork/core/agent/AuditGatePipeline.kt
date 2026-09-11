@@ -4,8 +4,15 @@ import com.yangz3720.simplywork.core.agent.tool.AgentToolRegistry
 import com.yangz3720.simplywork.core.agent.tool.RegisteredTool
 import com.yangz3720.simplywork.infrastructure.systemops.model.DangerLevel
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.put
 
 /**
  * Pre-Tool Audit Gate (flow node O) + Post-Tool Result Gate (flow node Q)
@@ -57,15 +64,108 @@ class AuditGatePipeline(
     /**
      * Flow node Q: normalized tool-result JSON → final model-facing content
      * (sanitize → truncate with an explicit marker).
+     *
+     * Truncation is JSON-aware (v1.2 复核 S6): a byte-cut of a serialized object yields
+     * invalid JSON, which the model then tries to parse — a busy calendar or app list comes
+     * back as a syntax error instead of a partial answer. When the (sanitized) payload still
+     * parses, we shrink it structurally; only text the sanitizer has mangled beyond
+     * recognition falls back to the legacy byte-cut.
      */
     fun postToolProcess(resultJson: JsonObject): String {
         val raw = resultJson.toString()
         val sanitized = sanitizer.sanitize(raw)
-        return if (sanitized.length > maxToolResultChars) {
-            sanitized.take(maxToolResultChars) + "[truncated ${sanitized.length - maxToolResultChars} chars]"
-        } else {
-            sanitized
+        if (sanitized.length <= maxToolResultChars) return sanitized
+
+        val element = runCatching { json.parseToJsonElement(sanitized) }.getOrNull()
+            ?: return sanitized.take(maxToolResultChars) +
+                "[truncated ${sanitized.length - maxToolResultChars} chars]"
+
+        // The shrunk payload carries its own `_truncated` notes, so no suffix is appended:
+        // anything after the closing brace/bracket would make the JSON unparseable again.
+        return shrink(element, maxToolResultChars).toString()
+    }
+
+    /**
+     * Structural shrink that is guaranteed to stay parseable by construction: arrays keep
+     * their leading entries plus a note item, objects cap oversized strings first and then
+     * drop trailing fields plus a note field. Longest-prefix search (binary) keeps as much
+     * data as the budget allows instead of halving blindly.
+     */
+    private fun shrink(element: JsonElement, budget: Int): JsonElement {
+        if (element.toString().length <= budget) return element
+        return when (element) {
+            is JsonArray -> {
+                var best: JsonArray? = null
+                var lo = 0
+                var hi = element.size
+                while (lo <= hi) {
+                    val mid = (lo + hi) / 2
+                    val probe = buildJsonArray {
+                        element.take(mid).forEach { add(it) }
+                        add(truncationNote("${element.size - mid} more entries omitted"))
+                    }
+                    if (probe.toString().length <= budget) {
+                        best = probe
+                        lo = mid + 1
+                    } else {
+                        hi = mid - 1
+                    }
+                }
+                best ?: fallback(element.toString(), budget)
+            }
+
+            is JsonObject -> {
+                // Cap runaway values first: one huge string loses its tail, one oversized
+                // nested array/object shrinks itself — neither drags whole sibling fields
+                // out with it when the budget could have held both.
+                val capped = buildJsonObject {
+                    element.forEach { (key, value) ->
+                        put(key, when {
+                            value is JsonPrimitive && value.isString && value.content.length > 512 ->
+                                JsonPrimitive(cutText(value.content, 512))
+                            value.toString().length > budget ->
+                                // 75% headroom: the child must leave room for the key and its
+                                // siblings, or the parent overflows right back into field-drop.
+                                shrink(value, (budget * 3) / 4)
+                            else -> value
+                        })
+                    }
+                }
+                if (capped.toString().length <= budget) return capped
+
+                val entries = capped.entries.toList()
+                var best: JsonObject? = null
+                var lo = 0
+                var hi = entries.size
+                while (lo <= hi) {
+                    val mid = (lo + hi) / 2
+                    val probe = buildJsonObject {
+                        entries.take(mid).forEach { (key, value) -> put(key, value) }
+                        if (mid < entries.size) put("_truncated", "${entries.size - mid} more fields omitted")
+                    }
+                    if (probe.toString().length <= budget) {
+                        best = probe
+                        lo = mid + 1
+                    } else {
+                        hi = mid - 1
+                    }
+                }
+                best ?: fallback(element.toString(), budget)
+            }
+
+            is JsonPrimitive -> JsonPrimitive(cutText(element.content, budget))
+            else -> fallback(element.toString(), budget)
         }
+    }
+
+    private fun truncationNote(message: String): JsonObject = buildJsonObject { put("_truncated", message) }
+
+    /** When nothing (not even a note) fits, emit a plain string primitive — still valid JSON. */
+    private fun fallback(raw: String, budget: Int): JsonElement = JsonPrimitive(cutText(raw, budget))
+
+    private fun cutText(text: String, budget: Int): String {
+        val room = (budget - 24).coerceAtLeast(0)
+        return text.take(room) + "…[cut]"
     }
 }
 

@@ -62,6 +62,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlin.coroutines.resume
+import kotlin.time.TimeSource
 
 private const val TAG = "SystemOps"
 
@@ -75,14 +76,27 @@ private const val LAUNCH_FALLBACK_CHANNEL_ID = "systemops_launch_fallback"
 private const val DEFAULT_CALENDAR_WINDOW_MS = 7L * 24 * 60 * 60 * 1000
 
 /**
- * Budget for a *fresh* GPS/network fix. Kept under the router's 10 s operation timeout so the
- * tool returns a usable answer (possibly a stale fix, flagged) instead of being killed by
- * `withTimeout` mid-request.
+ * Total wall-clock budget for one `sys_location_read`.
+ *
+ * The router wraps every operation in a *single* `withTimeout(DEFAULT_OP_TIMEOUT_MS)`, so the
+ * permission prompt, the provider waits and the optional geocode all share one deadline. They
+ * must therefore be derived from the time already spent, not summed as independent constants:
+ * fixed slices that add up near the ceiling discard a fully successful answer as `Timeout`,
+ * which in the field is indistinguishable from a random flake.
  */
-private const val FRESH_FIX_BUDGET_MS = 7_000L
+private const val LOCATION_CALL_BUDGET_MS = 9_000L
 
-/** Sub-budget for the optional reverse geocode, so it cannot eat the router's 10 s window. */
-private const val GEOCODE_BUDGET_MS = 2_500L
+/** Cap on waiting for a human to read and answer a permission dialog. */
+private const val PERMISSION_WAIT_BUDGET_MS = 5_000L
+
+/** Slice held back for the optional reverse geocode at the tail of a location call. */
+private const val GEOCODE_BUDGET_MS = 2_000L
+
+/** Network/passive providers answer fast; each gets this per attempt, GPS gets what is left. */
+private const val QUICK_PROVIDER_SLICE_MS = 1_200L
+
+/** Below this much remaining budget, stop chasing a fresh fix and return the cached one. */
+private const val MIN_FRESH_ATTEMPT_MS = 400L
 
 /** CalendarContract "deleted" column (see usage in queryCalendarEvents for why it is a literal). */
 private const val CALENDAR_DELETED_COLUMN = "deleted"
@@ -411,16 +425,21 @@ class SystemIntentExecutorImpl(
         val level = battery?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
         val scale = battery?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
         val percent = if (level >= 0 && scale > 0) level * 100 / scale else null
-        val plugged = battery?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0
+        val plugged = battery?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
         val status = battery?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+        val powerSave = powerSaveMode()
         val storage = storageSnapshot()
 
         Success(
             buildJsonObject {
+                // Unknown battery state is reported as null, never as `false`: asserting
+                // "not charging" on a device whose sticky intent we could not read is exactly
+                // the silent-false P2 forbids.
+                put("batteryAvailable", battery != null)
                 put("batteryPercent", percent?.let { JsonPrimitive(it) } ?: JsonNull)
-                put("batteryCharging", plugged != 0)
+                put("batteryCharging", plugged?.let { JsonPrimitive(it != 0) } ?: JsonNull)
                 put("batteryStatus", batteryStatusName(status))
-                put("powerSaveMode", powerSaveMode())
+                put("powerSaveMode", powerSave?.let { JsonPrimitive(it) } ?: JsonNull)
                 put("network", networkSnapshot())
                 put("storage", storage)
                 put("memory", memorySnapshot())
@@ -448,11 +467,15 @@ class SystemIntentExecutorImpl(
                             Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER),
                             PackageManager.ResolveInfoFlags.of(0L)
                         )
-                        .associate { it.activityInfo.packageName to it.loadLabel(packageManager).toString() }
+                        // distinctBy keeps the FIRST launcher entry per package. Label inflation
+                        // is per-package, so de-duplicating first avoids paying for activity
+                        // aliases — and unlike associate{}, the primary launcher label survives.
+                        .distinctBy { it.activityInfo.packageName }
+                        .map { it.activityInfo.packageName to it.loadLabel(packageManager).toString() }
                 } else {
                     packageManager
                         .getInstalledPackages(PackageManager.PackageInfoFlags.of(0L))
-                        .associate { info ->
+                        .map { info ->
                             info.packageName to (info.applicationInfo
                                 ?.loadLabel(packageManager)?.toString() ?: info.packageName)
                         }
@@ -462,9 +485,9 @@ class SystemIntentExecutorImpl(
                     e.message ?: "unknown error", e
                 )
             }
-            val matching = inventory.entries
-                .filter { needle == null || it.key.lowercase().contains(needle) || it.value.lowercase().contains(needle) }
-                .sortedBy { it.value.lowercase() }
+            val matching = inventory
+                .filter { needle == null || it.first.lowercase().contains(needle) || it.second.lowercase().contains(needle) }
+                .sortedBy { it.second.lowercase() }
             val page = matching.take(spec.limit)
             Success(
                 buildJsonObject {
@@ -490,9 +513,12 @@ class SystemIntentExecutorImpl(
 
         return withContext(Dispatchers.IO) {
             val start = spec.startTimeEpochMs ?: System.currentTimeMillis()
-            val end = spec.endTimeEpochMs ?: (start + DEFAULT_CALENDAR_WINDOW_MS)
+            // Guard the defaulting arithmetic too: a start near Long.MAX_VALUE would wrap the
+            // addition into a negative end and return an inverted, silently-empty window.
+            val end = spec.endTimeEpochMs ?: start.saturatingPlus(DEFAULT_CALENDAR_WINDOW_MS)
             val needle = spec.query?.trim()?.takeIf { it.isNotEmpty() }
             val events = ArrayList<kotlinx.serialization.json.JsonObject>(spec.limit)
+            var sawMore = false
             try {
                 // Instances (not Events) so recurring appointments expand into real occurrences.
                 val uri = android.provider.CalendarContract.Instances.CONTENT_URI
@@ -524,7 +550,10 @@ class SystemIntentExecutorImpl(
                     ),
                     selection,
                     args,
-                    "${android.provider.CalendarContract.Instances.BEGIN} ASC LIMIT ${spec.limit}"
+                    // No `LIMIT` here: CalendarProvider2's strict sort-order validation rejects
+                    // anything trailing ASC/DESC, and capping in the loop is what lets us report
+                    // `truncated` honestly.
+                    "${android.provider.CalendarContract.Instances.BEGIN} ASC"
                 )?.use { cursor ->
                     val titleIdx = cursor.getColumnIndexOrThrow(android.provider.CalendarContract.Instances.TITLE)
                     val beginIdx = cursor.getColumnIndexOrThrow(android.provider.CalendarContract.Instances.BEGIN)
@@ -533,17 +562,22 @@ class SystemIntentExecutorImpl(
                     val locationIdx = cursor.getColumnIndexOrThrow(android.provider.CalendarContract.Instances.EVENT_LOCATION)
                     val calendarIdx = cursor.getColumnIndexOrThrow(android.provider.CalendarContract.Instances.CALENDAR_ID)
                     while (cursor.moveToNext()) {
+                        if (events.size >= spec.limit) {
+                            sawMore = true
+                            break
+                        }
                         val begin = cursor.getLong(beginIdx)
                         val eventEnd = cursor.getLong(endIdx)
+                        val beginPoint = TimePoint.of(begin)
                         events.add(buildJsonObject {
                             put("title", cursor.getString(titleIdx) ?: "(untitled)")
                             put("startTimeEpochMs", begin)
                             put("endTimeEpochMs", eventEnd)
                             // All-day rows are stored against UTC midnight, so the local ISO
                             // rendering can land on the neighbouring day; epochMs is authoritative.
-                            put("startLocalIso", TimePoint.of(begin).localIso)
+                            put("startLocalIso", beginPoint.localIso)
                             put("endLocalIso", TimePoint.of(eventEnd).localIso)
-                            put("weekday", TimePoint.of(begin).weekday)
+                            put("weekday", beginPoint.weekday)
                             put("allDay", cursor.getInt(allDayIdx) == 1)
                             cursor.getString(locationIdx)?.takeIf { it.isNotBlank() }?.let { put("location", it) }
                             put("calendarId", cursor.getLong(calendarIdx))
@@ -566,6 +600,9 @@ class SystemIntentExecutorImpl(
                     put("windowStartIso", TimePoint.of(start).localIso)
                     put("windowEndIso", TimePoint.of(end).localIso)
                     put("count", events.size)
+                    // Without this the model reports a partial schedule as complete: the default
+                    // limit of 20 is well under what a busy month can hold (P2).
+                    put("truncated", sawMore)
                     putJsonArray("events") { events.forEach { add(it) } }
                 }
             )
@@ -573,6 +610,7 @@ class SystemIntentExecutorImpl(
     }
 
     override suspend fun readLocation(spec: LocationReadSpec): SystemOperationResult {
+        val started = TimeSource.Monotonic.markNow()
         val required = if (spec.accuracy == LocationAccuracy.PRECISE) {
             listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
         } else {
@@ -581,12 +619,18 @@ class SystemIntentExecutorImpl(
         val rationale = "Locating this device needs ${required.joinToString()}."
         // "any" not "all": Android 12+ lets the user pick approximate-only, which still yields a
         // legitimate coarse fix. Demanding FINE here would fail a call that has usable data, and
-        // the output already reports precisionDegraded when precision was not honored.
-        ensureAnyPermission(required, rationale)?.let { return it }
-        return withContext(Dispatchers.IO) { locate(spec) }
+        // the output reports precisionDegraded when precision was not honored.
+        ensureAnyPermission(required, rationale, remainingOf(LOCATION_CALL_BUDGET_MS, started))
+            ?.let { return it }
+        return withContext(Dispatchers.IO) { locate(spec, remainingOf(LOCATION_CALL_BUDGET_MS, started)) }
     }
 
-    private suspend fun locate(spec: LocationReadSpec): SystemOperationResult {
+    /** Milliseconds still available out of [budget], given what [started] has already consumed. */
+    private fun remainingOf(budget: Long, started: kotlin.time.TimeMark): Long =
+        (budget - started.elapsedNow().inWholeMilliseconds).coerceAtLeast(0L)
+
+    private suspend fun locate(spec: LocationReadSpec, budgetMs: Long): SystemOperationResult {
+        val entered = TimeSource.Monotonic.markNow()
         val manager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
             ?: return SystemOperationResult.Failed("This device has no location service")
         val enabled = try {
@@ -599,7 +643,8 @@ class SystemIntentExecutorImpl(
         if (enabled.isEmpty()) {
             return SecurityBlocked(
                 "Device location is switched off — no GPS or network provider is enabled. " +
-                    "Ask the user to turn on Location in system settings, then retry."
+                    "Ask the user to turn on Location in system settings, then retry. Requesting a " +
+                    "permission will not help: this is the device-wide Location toggle."
             )
         }
         // Order the enabled providers by how well they match the requested precision.
@@ -618,22 +663,46 @@ class SystemIntentExecutorImpl(
 
         // Location.getTime() is wall-clock epoch ms, so staleness must be measured against
         // System.currentTimeMillis() — elapsedRealtime() (since boot) would be nonsense here.
-        val maxAgeMs = spec.maxAgeSeconds.coerceAtLeast(0) * 1000L
+        val maxAgeMs = spec.maxAgeSeconds * 1000L
         val cached = freshestCachedFix(manager, preferred)
-        val fresh = if (cached != null && cached.ageMs <= maxAgeMs) {
-            null
-        } else {
-            awaitFreshFix(manager, preferred.first())
+        val geocodeReserve = if (spec.includeAddress) GEOCODE_BUDGET_MS else 0L
+        var remaining = budgetMs - geocodeReserve
+        var fresh: Location? = null
+        var subscribeError: String? = null
+
+        if (cached == null || cached.ageMs > maxAgeMs) {
+            // Walk the ordered providers instead of only the first: asking GPS alone indoors
+            // burns the whole budget for nothing when the already-enabled network provider
+            // would have answered in a few hundred milliseconds.
+            val queue = ArrayDeque(preferred)
+            while (fresh == null && queue.isNotEmpty() && remaining >= MIN_FRESH_ATTEMPT_MS) {
+                val provider = queue.removeFirst()
+                val slice = if (provider == LocationManager.GPS_PROVIDER || queue.isEmpty()) remaining
+                else minOf(QUICK_PROVIDER_SLICE_MS, remaining)
+                val attempt = awaitFreshFix(manager, provider, slice)
+                fresh = attempt.location
+                subscribeError = attempt.cause ?: subscribeError
+                remaining -= slice
+            }
         }
-        val fix = fresh ?: cached?.location
+
+        // Newest wins, not "whatever arrived last": a fresh delivery from PASSIVE can be older
+        // than the cached fix it just replayed.
+        val fix = listOfNotNull(fresh, cached?.location).maxByOrNull { it.time }
             ?: return SystemOperationResult.Failed(
-                "No position fix available: no cached fix and none produced within ${FRESH_FIX_BUDGET_MS}ms " +
-                    "(GPS indoors can take much longer). Retry with accuracy=APPROXIMATE, or ask the user for their city."
+                "No position fix available (${subscribeError ?: "no cached fix and none produced within ${budgetMs}ms"}). " +
+                    "A cold GPS fix indoors can take tens of seconds; retry with accuracy=APPROXIMATE, " +
+                    "raise maxAgeSeconds to accept a cached fix, or ask the user for their city."
             )
 
         val fineGranted = isGranted(Manifest.permission.ACCESS_FINE_LOCATION)
         // Resolved before the JSON builder: geocoding is a suspend call and may hit the network.
-        val address = if (spec.includeAddress) geocode(fix) else null
+        // It gets whatever of the reserved slice the provider walk did not spend.
+        val address = if (spec.includeAddress) {
+            geocode(fix, minOf(GEOCODE_BUDGET_MS, budgetMs - entered.elapsedNow().inWholeMilliseconds))
+        } else {
+            null
+        }
         return Success(
             buildJsonObject {
                 put("latitude", fix.latitude)
@@ -641,7 +710,7 @@ class SystemIntentExecutorImpl(
                 put("accuracyMeters", fix.accuracy.toDouble())
                 put("provider", fix.provider ?: "unknown")
                 put("timestampEpochMs", fix.time)
-                put("fixAgeSeconds", (System.currentTimeMillis() - fix.time) / 1000)
+                put("fixAgeSeconds", ((System.currentTimeMillis() - fix.time) / 1000).coerceAtLeast(0L))
                 put("isFromCache", fresh == null)
                 // Android 12+ lets the user grant approximate-only; report it instead of
                 // letting the model assume the precision it asked for.
@@ -661,6 +730,9 @@ class SystemIntentExecutorImpl(
         )
     }
 
+    /** Either a fix, or the reason the provider could not be asked at all. */
+    private data class FixAttempt(val location: Location?, val cause: String?)
+
     /**
      * Reverse geocode via the framework [Geocoder].
      *
@@ -668,9 +740,16 @@ class SystemIntentExecutorImpl(
      * (common on Google-less ROMs) still has a perfectly valid fix, and failing the whole
      * tool for an optional label would throw that away.
      */
-    private suspend fun geocode(location: Location): GeocodedAddress {
-        if (!Geocoder.isPresent()) return GeocodedAddress(null, null, "no geocoder backend on this device")
-        val addresses = withTimeoutOrNull(GEOCODE_BUDGET_MS) {
+    private suspend fun geocode(location: Location, budgetMs: Long): GeocodedAddress {
+        if (budgetMs < MIN_FRESH_ATTEMPT_MS) {
+            return GeocodedAddress(null, null, "skipped: no time budget left in this location call")
+        }
+        // The backend's own words are kept: "no geocode provider" and "no match for these
+        // coordinates" are different problems for the model to act on (P2).
+        // Geocoder.isPresent() is deliberately not consulted — it is deprecated at API 34 and
+        // the listener already reports a missing provider through onError.
+        var failure: String? = null
+        val addresses = withTimeoutOrNull(budgetMs) {
             suspendCancellableCoroutine<List<Address>> { continuation ->
                 try {
                     Geocoder(context, Locale.getDefault()).getFromLocation(
@@ -683,18 +762,20 @@ class SystemIntentExecutorImpl(
                             }
 
                             override fun onError(errorMessage: String?) {
+                                failure = errorMessage
                                 if (continuation.isActive) continuation.resume(emptyList())
                             }
                         }
                     )
                 } catch (e: Exception) {
+                    failure = e.message
                     if (continuation.isActive) continuation.resume(emptyList())
                 }
             }
-        } ?: return GeocodedAddress(null, null, "geocode timed out after ${GEOCODE_BUDGET_MS}ms")
+        } ?: return GeocodedAddress(null, null, "geocode timed out after ${budgetMs}ms")
 
         val match = addresses.firstOrNull()
-            ?: return GeocodedAddress(null, null, "geocoder returned no match")
+            ?: return GeocodedAddress(null, null, failure ?: "geocoder returned no match")
         val parts = listOfNotNull(match.adminArea, match.locality, match.subLocality, match.thoroughfare, match.subThoroughfare)
         val line = parts.joinToString(", ").ifBlank { match.getAddressLine(0).orEmpty() }
         return if (line.isBlank()) {
@@ -716,72 +797,143 @@ class SystemIntentExecutorImpl(
                 null // provider-level gate raced with a revocation; other providers may still answer
             }
         }.maxByOrNull { it.time } ?: return null
-        return CachedFix(best, now - best.time)
+        // A device with a skewed clock can report a fix from the future; a negative age would
+        // make a bogus fix look permanently fresh and suppress every attempt to get a real one.
+        return CachedFix(best, (now - best.time).coerceAtLeast(0L))
     }
 
     /**
-     * One update from [provider], or null when none arrives in time.
+     * One update from [provider], or null when none arrives within [timeoutMs].
      *
-     * The listener is unregistered on *every* exit path — on delivery, on cancellation, and on
-     * a failed subscribe. A leaked location listener drains battery continuously, which is not
-     * something a one-shot tool call should ever leave behind.
+     * The listener is unregistered on *every* exit path: on delivery, on provider disablement,
+     * on cancellation, and on a failed subscribe. `minTime = 0` means a leaked subscription is a
+     * continuous GPS draw for the life of the process, which is exactly what a one-shot tool
+     * call must never leave behind.
      */
-    private suspend fun awaitFreshFix(manager: LocationManager, provider: String): Location? =
-        withTimeoutOrNull(FRESH_FIX_BUDGET_MS) {
-            suspendCancellableCoroutine { continuation ->
+    private suspend fun awaitFreshFix(
+        manager: LocationManager,
+        provider: String,
+        timeoutMs: Long
+    ): FixAttempt {
+        if (timeoutMs < MIN_FRESH_ATTEMPT_MS) return FixAttempt(null, "no time budget for a fresh fix")
+        var subscribeError: String? = null
+        val location = withTimeoutOrNull(timeoutMs) {
+            suspendCancellableCoroutine<Location?> { continuation ->
                 val listener = object : LocationListener {
-                    override fun onLocationChanged(location: Location) {
-                        try {
-                            manager.removeUpdates(this)
-                        } catch (_: SecurityException) {
-                            // Permission revoked mid-flight; the system has already stopped delivery.
-                        }
-                        if (continuation.isActive) continuation.resume(location)
+                    override fun onLocationChanged(fix: Location) {
+                        safeRemoveUpdates(manager, this)
+                        if (continuation.isActive) continuation.resume(fix)
+                    }
+
+                    // Without this, switching Location off mid-wait costs the full slice
+                    // instead of falling through to the next provider immediately.
+                    override fun onProviderDisabled(disabled: String) {
+                        safeRemoveUpdates(manager, this)
+                        if (continuation.isActive) continuation.resume(null)
                     }
                 }
-                continuation.invokeOnCancellation {
-                    try {
-                        manager.removeUpdates(listener)
-                    } catch (_: SecurityException) {
-                        // same as above
-                    }
-                }
+                continuation.invokeOnCancellation { safeRemoveUpdates(manager, listener) }
                 try {
                     // Main looper: this body runs on Dispatchers.IO, which has no Looper of its own.
                     manager.requestLocationUpdates(provider, 0L, 0f, listener, Looper.getMainLooper())
+                    // suspendCancellableCoroutine runs this block even when the parent job is
+                    // already cancelled — in that case invokeOnCancellation fired *before* the
+                    // listener existed, so the subscription we just made has no other cleanup
+                    // path. Re-check after subscribing.
+                    if (!continuation.isActive) safeRemoveUpdates(manager, listener)
                 } catch (e: Exception) {
-                    AgentLogger.w(TAG) { "fresh fix request failed on $provider: ${e.message}" }
+                    subscribeError = "$provider: ${e.message ?: e.javaClass.simpleName}"
+                    safeRemoveUpdates(manager, listener)
                     if (continuation.isActive) continuation.resume(null)
                 }
             }
         }
+        return FixAttempt(location, subscribeError)
+    }
+
+    private fun safeRemoveUpdates(manager: LocationManager, listener: LocationListener) {
+        try {
+            manager.removeUpdates(listener)
+        } catch (_: SecurityException) {
+            // Permission revoked mid-flight: the system has already stopped delivery.
+        }
+    }
 
     // ----- permission seam (P4) -----
 
     private fun isGranted(permission: String): Boolean =
         ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
 
+    /** How a grant attempt ended. Collapsing these loses the difference the model must act on (P2). */
+    private enum class GrantAttempt {
+        /** The user answered the dialog (in either direction) — re-check the permission. */
+        Answered,
+
+        /** The dialog was shown but nobody answered inside the wait budget. */
+        NotAnswered,
+
+        /**
+         * We did not ask at all: the grant dialog is itself an activity start, and Android
+         * silently drops background activity starts (the same platform fact C4 records for our
+         * own launches). Asking then would be a guaranteed stall with no dialog on screen.
+         */
+        CannotAsk
+    }
+
+    private suspend fun attemptGrant(permissions: List<String>, rationale: String, waitBudgetMs: Long): GrantAttempt {
+        if (waitBudgetMs < MIN_FRESH_ATTEMPT_MS || !isAppForeground()) return GrantAttempt.CannotAsk
+        // A `false` answer is still an answer; only a null (timeout) means "never decided".
+        val answered = withTimeoutOrNull(waitBudgetMs) { permissionRequester.request(permissions, rationale) }
+        return if (answered == null) GrantAttempt.NotAnswered else GrantAttempt.Answered
+    }
+
+    private fun ungrantable(missing: List<String>, rationale: String, attempt: GrantAttempt, waitBudgetMs: Long) =
+        when (attempt) {
+            GrantAttempt.CannotAsk -> PermissionRequired(
+                missing,
+                "$rationale SimplyWork is not in the foreground, so Android will not show the grant " +
+                    "dialog (background activity starts are dropped). Bring the app to the front and retry — " +
+                    "repeating this call as-is will fail the same way."
+            )
+
+            GrantAttempt.NotAnswered -> PermissionRequired(
+                missing,
+                "$rationale The grant dialog was shown but went unanswered within ${waitBudgetMs}ms; " +
+                    "nothing was granted or denied. Ask the user, or retry once the app is in view."
+            )
+
+            GrantAttempt.Answered -> PermissionRequired(missing, rationale)
+        }
+
     /**
      * @return null when every [permissions] is granted, otherwise the result to hand back.
      * Asks the injected [permissionRequester] once before giving up (P4: the UI performs the
      * grant, we only report), then re-checks — "user tapped Allow" is not the same as granted.
      */
-    private suspend fun ensurePermissions(permissions: List<String>, rationale: String): SystemOperationResult? {
+    private suspend fun ensurePermissions(
+        permissions: List<String>,
+        rationale: String,
+        waitBudgetMs: Long = PERMISSION_WAIT_BUDGET_MS
+    ): SystemOperationResult? {
         if (permissions.all(::isGranted)) return null
-        permissionRequester.request(permissions, rationale)
+        val attempt = attemptGrant(permissions, rationale, waitBudgetMs)
         val stillMissing = permissions.filterNot(::isGranted)
-        return if (stillMissing.isEmpty()) null else PermissionRequired(stillMissing, rationale)
+        return if (stillMissing.isEmpty()) null else ungrantable(stillMissing, rationale, attempt, waitBudgetMs)
     }
 
     /**
      * Variant for capabilities that degrade instead of failing: proceeds as soon as *any* of
      * [permissions] is held. Only reports PermissionRequired when none of them came through.
      */
-    private suspend fun ensureAnyPermission(permissions: List<String>, rationale: String): SystemOperationResult? {
+    private suspend fun ensureAnyPermission(
+        permissions: List<String>,
+        rationale: String,
+        waitBudgetMs: Long = PERMISSION_WAIT_BUDGET_MS
+    ): SystemOperationResult? {
         if (permissions.any(::isGranted)) return null
-        permissionRequester.request(permissions, rationale)
-        val held = permissions.filter(::isGranted)
-        return if (held.isEmpty()) PermissionRequired(permissions, rationale) else null
+        val attempt = attemptGrant(permissions, rationale, waitBudgetMs)
+        return if (permissions.any(::isGranted)) null
+        else ungrantable(permissions, rationale, attempt, waitBudgetMs)
     }
 
     // ----- device snapshot helpers -----
@@ -795,10 +947,10 @@ class SystemIntentExecutorImpl(
         null
     }
 
-    private fun powerSaveMode(): Boolean = try {
-        (context.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager)?.isPowerSaveMode == true
+    private fun powerSaveMode(): Boolean? = try {
+        (context.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager)?.isPowerSaveMode
     } catch (_: Exception) {
-        false
+        null
     }
 
     private fun networkSnapshot() = buildJsonObject {
@@ -865,6 +1017,16 @@ class SystemIntentExecutorImpl(
     // ----- helpers -----
 
     private fun appLabel(): String = context.applicationInfo.loadLabel(packageManager).toString()
+}
+
+/** Addition that stops at [Long.MAX_VALUE] instead of wrapping into a negative timestamp. */
+private fun Long.saturatingPlus(deltaMs: Long): Long {
+    val result = this + deltaMs
+    return if ((deltaMs.xor(result).and(this.xor(result))) < 0) {
+        if (deltaMs < 0) Long.MIN_VALUE else Long.MAX_VALUE
+    } else {
+        result
+    }
 }
 
 /** Production foreground signal: our process importance (≈ focused window). Injectable for tests. */

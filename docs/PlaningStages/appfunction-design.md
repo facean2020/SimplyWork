@@ -7,7 +7,7 @@
 >
 > **v1.2 修订（读侧能力补齐 2026-09-11）**：
 > - **新增 6 个 `sys_*` 读工具**（目录 7 → 13）：`sys_time_read` / `sys_time_calc` / `sys_device_read` / `sys_app_list` / `sys_calendar_query` / `sys_location_read`。动机是模型侧的三个硬缺口：
->   1. **模型没有任何时间感**：`AgentConfig.DEFAULT_SYSTEM_PROMPT` 与 `AgentContextAssembler` 的注入链都不含当前时间，而 `sys_calendar_insert` 的入参是 `startTimeEpochMs`（int64 epoch 毫秒）——没有读钟工具，任何排期都只能靠猜，日历写入实际处于残废状态。
+>   1. **模型没有任何时间感**：`AgentConfig.DEFAULT_SYSTEM_PROMPT` 与 `AgentContextAssembler` 的注入链都不含当前时间，而 `sys_calendar_insert` 的入参是 `startTimeEpochMs`（int64 epoch 毫秒）——没有读钟工具，任何排期都只能靠猜，日历写入实际处于残废状态。修复取**每轮注入**而非每节点注入（v1.2 复核裁决）：仅 `UserPrompt` 节点在装配期前置一行 `[message time: yyyy-MM-dd EEE HH:mm UTC±HH:mm]`（墙钟可读格式，时区规则已把夏令时折进偏移量，epoch 不给模型），工具/助手/结果节点零开销；系统提示同步声明该前缀的语义与"日期敏感调用仍需 `sys_time_read`"。
 >   2. **日历只有写没有读**：无法回答"今天/本周有什么安排"。
 >   3. **完全没有定位与应用清单**：`sys_app_open` 要求模型给出精确包名，但没有列举手段，只能猜包名并稳定吃到 `target_not_found`。
 > - **执行路径不新增**：6 个读工具全部继续走 `SystemOperationRouter`（继承超时 + 异常归一 + 计时），`ExecutionPath` 不扩枚举。它们不是 Intent，但 v1.1 起 `SystemIntentExecutor` 实际已承载 ClipboardManager / NotificationManager 等非 Intent 操作，沿用同一执行器以免为一个命名洁癖改动门面契约。**记为命名债**：执行器现名与职责已不符，待 tool-core 正式落地时一并更名。
@@ -89,7 +89,7 @@ flowchart LR
 | 读设备状态（电量/网络/存储/内存/机型） | `registerReceiver(null, …)` 粘滞广播 + `ConnectivityManager` + `StatFs` + `ActivityManager` | C10 无关；`ACCESS_NETWORK_STATE` 为 normal 权限 |
 | 读已安装应用清单 | `PackageManager.queryIntentActivities` / `getInstalledPackages` | 依赖 `QUERY_ALL_PACKAGES` 才有完整可见性 |
 | 读日历事件 | `ContentResolver` 查 `CalendarContract.Instances`（**不是 Events**：只有 Instances 会把周期事件展开成真实发生次） | READ_CALENDAR（运行时） |
-| 读设备定位 | 框架 `LocationManager`（无 Play Services 依赖）：last-known 优先，过期才请求单次定位 | C9 双门禁；C10 地址为软字段 |
+| 读设备定位 | 框架 `LocationManager`（无 Play Services 依赖）：按精度排序遍历**全部已启用 provider**（GPS 拿剩余预算，网络/passive 各 1.2 s 快片），缓存与新鲜 fix 取 `getTime()` 较新者；单次定位预算 = 总预算 9 s 减去已耗时间与 Geocoder 保留片，**不是固定常数相加** | C9 双门禁；C10 地址为软字段 |
 
 > v1.2 读侧一览：这 6 类操作**都不是 Intent**，但一律经 `SystemOperationRouter` 分发，以继承超时（10 s）、异常归一与统一计时。§3.1「Router 是唯一门面」是硬约束——读操作也不许旁路。
 
@@ -268,7 +268,7 @@ interface SystemOperationRouter {
 
 依赖项：**零新增**（复用 kotlinx-serialization / coroutines / androidx.core；未引入 shizuku、kotlinx-datetime、play-services）。定位与反向地理编码均走框架 `LocationManager` / `Geocoder`。
 
-> **Phase 4 尚未真机验证**：本仓库唯一自动化门禁是 JVM 单测，`READ_CALENDAR` / 定位 / 电量广播 / `Geocoder` 后端等依赖真实平台实现的路径只做到编译通过 + 逻辑单测，instrumented 用例见 §8.2 欠账池。
+> **Phase 4 真机验证**（2026-09-11，小米真机 USB）：`SystemOpsDeviceAcceptanceTest` + `SystemOpsReadToolAcceptanceTest` 共 **17 用例全部通过**（`am instrument -w` 直驱，权限经 `pm grant` 预授）。真机路径已覆盖：日历 Provider（Instances 展开 + `truncated` 标记）、定位 Provider 遍历与"室内拿不到 fix"的设计内 `Failed`（文案带下一步指引，验收用例已锚定）、运行时权限缺席路径（`pm grant` 移除后复验 `PermissionRequired`）、电量/网络/存储广播快照。仍属欠账：MIUI 类 ROM 的真实授权弹窗交互、`Geocoder` 后端有网地址解析、App 后台时权限申请被平台丢弃的 `CannotAsk` 分支（代码路径存在，需真机前后台切换手工验证）。
 
 ---
 

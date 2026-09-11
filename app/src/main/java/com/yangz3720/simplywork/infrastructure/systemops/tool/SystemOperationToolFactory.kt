@@ -66,9 +66,21 @@ object SystemOperationToolFactory {
     const val TOOL_LOCATION_READ = "sys_location_read"
 
     /** Parser-enforced ceilings: a model-invented huge limit is rejected, never silently clamped. */
-    private const val MAX_APP_LIMIT = 300
-    private const val MAX_CALENDAR_EVENTS = 100
+    private const val MAX_APP_LIMIT = 100
+    private const val MAX_CALENDAR_EVENTS = 40
     private const val MAX_LOCATION_AGE_SECONDS = 24 * 60 * 60
+    private const val DAY_MS = 24L * 60 * 60 * 1000
+
+    /**
+     * Ceiling on an explicit query window. An unbounded window asks CalendarProvider2 to expand
+     * occurrences across the whole supported range synchronously: the call can only ever come
+     * back as `timeout` while the provider keeps churning. Bounding it here is the same rule as
+     * the other ceilings — reject at parse time, do not clamp in secret.
+     */
+    private const val MAX_CALENDAR_SPAN_MS = 92L * DAY_MS
+
+    /** 2100-01-01. Rejects obviously-wrong epochs before they can overflow span arithmetic. */
+    private const val SANE_MAX_EPOCH_MS = 4_102_444_800_000L
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -113,8 +125,22 @@ object SystemOperationToolFactory {
             j.decode(CalendarQuerySpec.serializer(), o).also {
                 guard(it.limit in 1..MAX_CALENDAR_EVENTS, "limit must be between 1 and $MAX_CALENDAR_EVENTS")
                 guard(
+                    it.startTimeEpochMs == null || it.startTimeEpochMs in 0..SANE_MAX_EPOCH_MS,
+                    "startTimeEpochMs is not a plausible epoch milliseconds value"
+                )
+                guard(
+                    it.endTimeEpochMs == null || it.endTimeEpochMs in 0..SANE_MAX_EPOCH_MS,
+                    "endTimeEpochMs is not a plausible epoch milliseconds value"
+                )
+                guard(
                     it.startTimeEpochMs == null || it.endTimeEpochMs == null || it.startTimeEpochMs < it.endTimeEpochMs,
                     "startTimeEpochMs must be earlier than endTimeEpochMs"
+                )
+                val start = it.startTimeEpochMs
+                val end = it.endTimeEpochMs
+                guard(
+                    start == null || end == null || end - start <= MAX_CALENDAR_SPAN_MS,
+                    "query window must span at most ${MAX_CALENDAR_SPAN_MS / DAY_MS} days"
                 )
             }
         },
@@ -230,7 +256,7 @@ object SystemOperationToolFactory {
                     "channelId" to stringProp("Notification channel id (created on demand)"),
                     "title" to stringProp("Notification title"),
                     "message" to stringProp("Notification body text"),
-                    "priority" to integerProp("NotificationCompat priority (-2..2), default 0"),
+                    "priority" to integerProp("NotificationCompat priority (-2..2), default 0", format = "int32"),
                     required = listOf("channelId", "title", "message")
                 )
             ),
@@ -270,7 +296,7 @@ object SystemOperationToolFactory {
                     "forward to weekday, then overwrite the clock with timeOfDay. Use this instead of doing date " +
                     "arithmetic yourself.",
                 parametersSchema = objectSchema(
-                    "amount" to integerProp("Signed offset applied to the base, e.g. 3 or -2. Default 0"),
+                    "amount" to integerProp("Signed offset applied to the base, e.g. 3 or -2. Default 0", format = "int32"),
                     "unit" to enumProp(
                         TimeUnit.entries.map { it.name },
                         "Unit for amount (default DAY). MONTH/YEAR clamp the day-of-month (Jan 31 + 1 month = Feb 28)"
@@ -305,7 +331,7 @@ object SystemOperationToolFactory {
                     "app_open needs an exact package name and guessing one returns target_not_found.",
                 parametersSchema = objectSchema(
                     "query" to stringProp("Case-insensitive filter matched against the display label or package name"),
-                    "limit" to integerProp("Maximum entries to return (1..300), default 40"),
+                    "limit" to integerProp("Maximum entries to return (1..$MAX_APP_LIMIT), default 40", format = "int32"),
                     "launchableOnly" to booleanProp("Default true = only apps with a launcher entry; false = every installed package")
                 )
             ),
@@ -317,12 +343,14 @@ object SystemOperationToolFactory {
                 name = TOOL_CALENDAR_QUERY,
                 description = "Read calendar events in a time window (default: the next 7 days from now), " +
                     "expanding recurring appointments into real occurrences. Returns epochMs plus local ISO " +
-                    "times. Needs READ_CALENDAR; a permission_required result means the user was asked and did not grant it.",
+                    "times. Needs READ_CALENDAR. Check the 'truncated' flag before calling a window complete, " +
+                    "and read the permission_required rationale: it distinguishes 'user denied' from 'app is in " +
+                    "the background so no dialog could be shown' — retrying the same call fixes neither.",
                 parametersSchema = objectSchema(
                     "startTimeEpochMs" to integerProp("Window start; defaults to the current time"),
                     "endTimeEpochMs" to integerProp("Window end; defaults to startTimeEpochMs + 7 days"),
                     "query" to stringProp("Optional case-insensitive substring filter on the event title"),
-                    "limit" to integerProp("Maximum events (1..100), default 20")
+                    "limit" to integerProp("Maximum events (1..$MAX_CALENDAR_EVENTS), default 20", format = "int32")
                 )
             ),
             // Reads the user's private schedule straight out of the provider, so it passes the
@@ -336,14 +364,23 @@ object SystemOperationToolFactory {
                 description = "Read the device location (latitude/longitude + accuracy and age). " +
                     "Needs the location runtime permission AND device Location switched on; a " +
                     "security_blocked result means Location is off on the device, not that permission is missing. " +
-                    "Prefer APPROXIMATE unless the task really needs street-level precision.",
+                    "Returns the newest available fix — when no fresh fix arrives in time it hands back a cached " +
+                    "one with isFromCache=true and its age, so raise maxAgeSeconds rather than retrying. " +
+                    "A cold GPS fix can take longer than this call's whole budget, and nothing can be located " +
+                    "while the app is backgrounded. Prefer APPROXIMATE unless the task needs street-level precision.",
                 parametersSchema = objectSchema(
                     "accuracy" to enumProp(
                         LocationAccuracy.entries.map { it.name },
-                        "APPROXIMATE (default) uses network/passive providers; PRECISE prefers GPS and needs fine location"
+                        "APPROXIMATE (default) prefers network/passive providers; PRECISE prefers GPS. Both fall " +
+                            "back to whichever providers are enabled, and if the user granted approximate-only, " +
+                            "PRECISE still succeeds on a coarse fix and reports precisionDegraded."
                     ),
-                    "maxAgeSeconds" to integerProp("How stale a cached fix may be before asking a provider for a fresh one (default 120). A fresh GPS fix can take a long time indoors."),
-                    "includeAddress" to booleanProp("Reverse-geocode to a human address line. Costs an extra lookup and is unavailable on devices without a geocoder backend — the result then carries addressUnavailable.")
+                    "maxAgeSeconds" to integerProp(
+                        "How stale a cached fix may be before asking a provider for a fresh one (default 120). " +
+                            "Set it high to take the cache and skip the wait entirely.",
+                        format = "int32"
+                    ),
+                    "includeAddress" to booleanProp("Reverse-geocode to a human address line. Costs an extra lookup inside this call's time budget and is unavailable on devices without a geocoder backend — the result then carries addressUnavailable.")
                 )
             ),
             dangerLevel = DangerLevel.USER_CONFIRMING,
@@ -368,9 +405,14 @@ object SystemOperationToolFactory {
         put("description", description)
     }
 
-    private fun integerProp(description: String): JsonObject = buildJsonObject {
+    /**
+     * `format` is part of the contract with the model: an int64 advertisement on an `Int` field
+     * invites a value that fails kotlinx decoding, which costs a round of `audit_denied` instead
+     * of the actionable message our own guards produce.
+     */
+    private fun integerProp(description: String, format: String = "int64"): JsonObject = buildJsonObject {
         put("type", "integer")
-        put("format", "int64")
+        put("format", format)
         put("description", description)
     }
 

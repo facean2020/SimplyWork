@@ -105,4 +105,29 @@ class PermissionCoordinatorTest {
         assertEquals(true, result)
         job.join()
     }
+
+    /**
+     * 复核 S10：串行假设被打破（竞态/重建）时，第二个 request 不允许让第一个调用方
+     * 永久悬空 —— 旧请求按"未授予"收敛，且 finally 清理不得误伤新请求的挂起态。
+     */
+    @Test
+    fun `overlapping request resolves the earlier one without clobbering state`() = runTest {
+        val coordinator = PermissionCoordinator()
+        var first: Boolean? = null
+        var second: Boolean? = null
+        val job1 = launch { first = coordinator.request(listOf(coarse), "first") }
+        advanceUntilIdle()
+        val job2 = launch { second = coordinator.request(listOf(fine), "second") }
+        advanceUntilIdle()
+
+        assertEquals(false, first)
+        assertEquals(listOf(fine), coordinator.pending.value?.permissions)
+
+        coordinator.respond(true)
+        advanceUntilIdle()
+        assertEquals(true, second)
+        assertNull(coordinator.pending.value)
+        job1.join()
+        job2.join()
+    }
 }

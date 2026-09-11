@@ -218,6 +218,18 @@ class SystemOpsReadToolAcceptanceTest {
                 assertNotNull("isFromCache", output["isFromCache"])
             }
 
+            /**
+             * Providers enabled but no fix within the call budget is a *designed* terminal
+             * state (P2): a cold GPS fix indoors routinely outlasts the budget. Legitimate
+             * only with the actionable guidance attached — a bare failure would strand the
+             * model with no next step.
+             */
+            is SystemOperationResult.Failed -> assertTrue(
+                "no-fix failure must carry the actionable guidance: ${result.message}",
+                result.message.contains("No position fix") &&
+                    (result.message.contains("APPROXIMATE") || result.message.contains("maxAgeSeconds"))
+            )
+
             else -> throw AssertionError("unexpected terminal result: $result")
         }
     }

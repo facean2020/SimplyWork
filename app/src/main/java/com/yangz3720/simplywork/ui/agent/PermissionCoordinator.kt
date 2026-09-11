@@ -29,13 +29,21 @@ class PermissionCoordinator {
     /** 由执行器调用：挂起直至用户决策或运行取消/超时。 */
     suspend fun request(permissions: List<String>, rationale: String): Boolean {
         val pendingDeferred = CompletableDeferred<Boolean>()
+        // 重叠保护（v1.2 复核 S10）：正常情况下 Agent Loop 串行执行，至多一个挂起；
+        // 但屏幕重建或竞态下二次 request 不能让第一个调用方永久悬空 —— 旧请求按
+        // "未被授予"收敛，调用方复查权限后自然走 PermissionRequired（P2 显式失败）。
+        deferred?.complete(false)
         deferred = pendingDeferred
         _pending.value = PermissionRequest(permissions, rationale)
         try {
             return pendingDeferred.await()
         } finally {
-            deferred = null
-            _pending.value = null
+            // 仅当挂起态仍是本次请求时才清空：若已被更新的请求覆盖，
+            // 清空会误伤新请求的 pending 状态。
+            if (deferred === pendingDeferred) {
+                deferred = null
+                _pending.value = null
+            }
         }
     }
 
