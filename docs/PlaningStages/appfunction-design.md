@@ -238,6 +238,26 @@ interface SystemOperationRouter {
 - `sys_time_read` 的描述里显式要求"先调用它再回答任何 today/now 问题、再构造其它工具的 epochMs"——这是让模型真正用起来的关键，不能只靠工具名。
 - `sys_app_list` 的描述显式指向 `sys_app_open`（"先查包名再打开"），把两个工具串成模型能照做的顺序。
 
+### 5.5 v1.3 自操作工具族（`SelfOpsTools.kt`，不走 Router）
+
+用户定调的"操作自己"四件套：配置 hook + 只读会话记录 + 内部沙箱 + 项目工作空间。
+这些**不是 Android 系统能力**，与 `todo_write` 同构：以 `RegisteredTool` 直接注册进 `AgentToolRegistry`，**不走 SystemOperationRouter**（`sys_*` → Router 的不变量保持干净）。
+
+- **Android 能否操作自己**：能。App 私有目录（`filesDir` 等）读写不需要任何权限；但让 agent 裸写 `shared_prefs`/SQLite 是自毁行为，所以配置 hook 只暴露**类型化白名单缝 `AgentSelfConfig`**（AppContainer 实现），与 UI 点选同源。
+- 工具目录（10 个）：
+  | 工具 | 等级 | 说明 |
+  |---|---|---|
+  | `self_config_read` | SAFE | 选择/超时/账号（仅 `hasKey`，API Key 本体永不出缝）/项目列表/当前项目 |
+  | `self_config_update` | USER_CONFIRMING | 白名单变更：切换 provider+model（必须成对）、timeoutMs（1000..600000）、当前项目；run 内改动只落盘，下一轮 run 生效（`rebuildPending` 声明） |
+  | `self_session_read` | SAFE | mode=list（会话元数据）或 read（活跃路径节点 + payload，默认当前会话，可跨会话只读） |
+  | `self_project_create` | SAFE | 建项目（名字 ≤48、大小写不敏感去重），沙箱目录与项目同生，不切当前 |
+  | `fs_list` / `fs_read` / `fs_write` / `fs_mkdir` | SAFE | 项目沙箱内自由（Code Interpreter 语义）；读 256KB 截断声明、写 256KB 拒绝、列目录 500 条 `truncated` |
+  | `fs_move` | USER_VISIBLE | 目标存在即拒绝（不静默覆盖） |
+  | `fs_delete` | USER_CONFIRMING | 非空目录需 `recursive=true`；项目根不可删 |
+- **`AgentWorkspace` 路径安全**（`core/workspace/`，纯 File、JVM 可测）：projectId 白名单正则；相对路径 canonical 化后必须仍在项目目录内（`../`、绝对路径、符号链接跳出显式拒绝）；base 必须 canonical（macOS `/var→/private/var` 符号链接会让非 canonical base 把所有合法路径误判为逃逸——已修）。
+- **项目**：`ProjectStore`（SharedPreferences JSON + 当前指针，指针失效回落默认项目）、`sessions.project_id` 列（SqliteSessionStore **v2 原地 ALTER TABLE 迁移，不再 drop**；NULL 行按默认项目 `default` 归属渲染）；UI 抽屉按当前项目过滤会话 + 项目切换/新建弹层。
+- **配置重建时序**：agent 自改配置 → keyring 落盘 + `configVersion` 自增；VM 观察到且**空闲**时 `rebuildRuntimeIfNeeded()`（run 内重建会换掉运行中的 coordinator，run 结束后同样落地）。
+
 ---
 
 ## 6. 与 Core 层的集成（待 tool-core / agent-core 实现时对接）

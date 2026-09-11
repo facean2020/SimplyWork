@@ -70,7 +70,12 @@ data class SessionRecord(
     val id: String,
     val title: String,
     val createdAt: Long,
-    val activeLeafId: String? = null
+    val activeLeafId: String? = null,
+    /**
+     * Owning project (v1.3 项目工作空间). `null` = pre-v1.3 row, rendered as the default
+     * project ("default") by the UI and the self-session-read tool — never a missing owner.
+     */
+    val projectId: String? = null
 )
 
 /**

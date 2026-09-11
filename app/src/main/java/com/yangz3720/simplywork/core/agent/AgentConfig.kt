@@ -50,6 +50,14 @@ data class AgentConfig(
               settings (e.g. Location switched off) — a permission request will not help.
             - Track multi-step work with the todo_write tool; keep it accurate so the
               completion guard can verify closure.
+            - Self-operations: conversations are organized into projects. Each project owns
+              its own sandbox workspace (fs_list/fs_read/fs_write/fs_mkdir operate inside the
+              CURRENT project by default; fs_move/fs_delete need user confirmation). Read past
+              conversations with self_session_read (mode=list or read), inspect your own config
+              with self_config_read, and change it via self_config_update (model/provider,
+              timeout, current project) — API keys can never be read or written, and config
+              changes take effect for the NEXT run. Create projects with self_project_create
+              before working on a new topic so its files and sessions stay together.
             - When everything is done, answer concisely in the user's language and stop.
         """.trimIndent()
     }

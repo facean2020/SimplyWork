@@ -28,33 +28,39 @@ class SqliteSessionStore(context: Context, databaseName: String = "agent_session
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // v1: no prior versions; recreate is acceptable only before first release.
-        db.execSQL("DROP TABLE IF EXISTS nodes")
-        db.execSQL("DROP TABLE IF EXISTS sessions")
-        db.execSQL("DROP TABLE IF EXISTS session_state")
-        onCreate(db)
+        // v1→v2: add the project column IN PLACE — the device database already holds real
+        // conversation history, so the old drop-and-recreate is no longer acceptable.
+        // ALTER TABLE ADD COLUMN leaves pre-v1.3 rows with project_id = NULL, which the
+        // repository contract reads as "default project".
+        if (oldVersion < 2) {
+            db.execSQL("ALTER TABLE sessions ADD COLUMN project_id TEXT")
+        }
     }
 
     override fun insertSession(record: SessionRecord) {
         writableDatabase.execSQL(
-            "INSERT OR REPLACE INTO sessions(id, title, created_at, active_leaf_id) VALUES(?, ?, ?, ?)",
-            arrayOf(record.id, record.title, record.createdAt, record.activeLeafId)
+            "INSERT OR REPLACE INTO sessions(id, title, created_at, active_leaf_id, project_id) VALUES(?, ?, ?, ?, ?)",
+            arrayOf(record.id, record.title, record.createdAt, record.activeLeafId, record.projectId)
         )
     }
 
     override fun getSession(sessionId: String): SessionRecord? =
-        readableDatabase.rawQuery("SELECT id, title, created_at, active_leaf_id FROM sessions WHERE id = ?", arrayOf(sessionId)).use { cursor ->
+        readableDatabase.rawQuery(
+            "SELECT id, title, created_at, active_leaf_id, project_id FROM sessions WHERE id = ?",
+            arrayOf(sessionId)
+        ).use { cursor ->
             if (!cursor.moveToFirst()) null else SessionRecord(
                 id = cursor.getString(0),
                 title = cursor.getString(1),
                 createdAt = cursor.getLong(2),
-                activeLeafId = cursor.getString(3)
+                activeLeafId = cursor.getString(3),
+                projectId = cursor.getString(4)
             )
         }
 
     override fun listSessions(): List<SessionRecord> =
         readableDatabase.rawQuery(
-            "SELECT id, title, created_at, active_leaf_id FROM sessions ORDER BY created_at DESC",
+            "SELECT id, title, created_at, active_leaf_id, project_id FROM sessions ORDER BY created_at DESC",
             emptyArray()
         ).use { cursor ->
             val result = ArrayList<SessionRecord>(cursor.count)
@@ -64,7 +70,8 @@ class SqliteSessionStore(context: Context, databaseName: String = "agent_session
                         id = cursor.getString(0),
                         title = cursor.getString(1),
                         createdAt = cursor.getLong(2),
-                        activeLeafId = cursor.getString(3)
+                        activeLeafId = cursor.getString(3),
+                        projectId = cursor.getString(4)
                     )
                 )
             }
@@ -139,14 +146,15 @@ class SqliteSessionStore(context: Context, databaseName: String = "agent_session
         }
 
     companion object {
-        private const val DB_VERSION = 1
+        private const val DB_VERSION = 2
 
         private const val SQL_CREATE_SESSIONS =
             "CREATE TABLE sessions (" +
                 "id TEXT PRIMARY KEY NOT NULL, " +
                 "title TEXT NOT NULL, " +
                 "created_at INTEGER NOT NULL, " +
-                "active_leaf_id TEXT)"
+                "active_leaf_id TEXT, " +
+                "project_id TEXT)"
 
         private const val SQL_CREATE_NODES =
             "CREATE TABLE nodes (" +

@@ -5,6 +5,8 @@ import androidx.lifecycle.viewModelScope
 import com.yangz3720.simplywork.core.AgentRuntime
 import com.yangz3720.simplywork.core.agent.AgentStepEvent
 import com.yangz3720.simplywork.core.agent.IncomingMessage
+import com.yangz3720.simplywork.core.session.ProjectLogic
+import com.yangz3720.simplywork.core.session.ProjectStore
 import com.yangz3720.simplywork.core.session.SessionRecord
 import com.yangz3720.simplywork.infrastructure.model.config.ProviderAccount
 import kotlinx.coroutines.CancellationException
@@ -14,6 +16,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -30,6 +33,15 @@ interface AgentRuntimeOwner {
     fun accounts(): List<ProviderAccount>
     fun selection(): ModelSelection?
     fun timeoutMs(): Long
+
+    /**
+     * 配置版本（v1.3）：agent 经 self_config_update 自改配置时自增。VM 据此在空闲时
+     * 调 [rebuildRuntimeIfNeeded] 让变更落地（run 内重建会换掉运行中的 coordinator）。
+     */
+    val configVersion: StateFlow<Int>
+
+    /** 落地待重建的配置变更（no-op 当无变更）；调用方保证当前无运行中的 run。 */
+    fun rebuildRuntimeIfNeeded()
 
     /** 设置页：保存某服务商的 API Key（若为当前选中服务商则重建运行时）。 */
     fun saveAccountKey(accountId: String, apiKey: String)
@@ -67,6 +79,8 @@ class AgentViewModel(
     /** Must be the same instance the AppContainer wired into the executor — a private copy
      * would leave every permission request hanging until the router timeout. */
     val permissionCoordinator: PermissionCoordinator,
+    /** 项目注册表（v1.3）：会话归属 + 沙箱目录；UI 与 agent 共用同一实例。 */
+    private val projectStore: ProjectStore,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : ViewModel() {
 
@@ -79,7 +93,9 @@ class AgentViewModel(
             providerAccounts = owner.accounts(),
             activeProviderId = selection?.providerId,
             activeModel = selection?.model.orEmpty(),
-            modelConfigured = selection != null && selection.model.isNotBlank()
+            modelConfigured = selection != null && selection.model.isNotBlank(),
+            projects = projectStore.list(),
+            currentProjectId = projectStore.currentId()
         )
     }
 
@@ -93,22 +109,66 @@ class AgentViewModel(
 
     init {
         viewModelScope.launch(ioDispatcher) {
-            val sessions = repository()?.listSessions().orEmpty()
+            val sessions = sessionsForCurrentProject(repository()?.listSessions().orEmpty())
             _uiState.update { it.copy(sessions = sessions) }
             // 打开最近一个会话；没有会话则停留在"新对话"空态。
             sessions.firstOrNull()?.id?.let { openSession(it) }
+        }
+        // v1.3：agent 经 self_config_update 自改配置 → 空闲时落地重建（run 内不重建，
+        // 否则会换掉运行中的 coordinator；变更对下一轮 run 生效，工具结果里已声明）。
+        viewModelScope.launch(ioDispatcher) {
+            owner.configVersion.drop(1).collect {
+                if (!_uiState.value.running) {
+                    owner.rebuildRuntimeIfNeeded()
+                    refreshSelection()
+                }
+            }
+        }
+        // 项目/当前项目变更（UI 或 agent）→ 会话过滤条件变了，刷新列表。
+        viewModelScope.launch(ioDispatcher) {
+            projectStore.changes.drop(1).collect { refreshProjectsAndSessions() }
         }
     }
 
     // ----- 会话管理 -----
 
-    /** ChatGPT 式新对话：清空当前投影；会话在首条消息发送时才落库。 */
+    /** ChatGPT 式新对话：清空当前投影；会话在首条消息发送时才落库（归属当前项目）。 */
     fun startNewChat() {
         runJob?.cancel()
         _uiState.update { current ->
             AgentUiState(
                 sessions = current.sessions,
-                modelConfigured = current.modelConfigured
+                modelConfigured = current.modelConfigured,
+                projects = current.projects,
+                currentProjectId = current.currentProjectId
+            )
+        }
+    }
+
+    // ----- 项目（v1.3）-----
+
+    /** 切换当前项目：会话列表过滤 + 新会话归属 + fs_* 工具默认目录随之改变。运行中拒绝。 */
+    fun switchProject(projectId: String) {
+        if (_uiState.value.running) {
+            _uiState.update { it.copy(runError = "正在运行中，请先停止当前任务再切换项目") }
+            return
+        }
+        if (!projectStore.switchTo(projectId)) {
+            _uiState.update { it.copy(runError = "未知项目：$projectId") }
+            return
+        }
+        // switchTo 触发 projectStore.changes → refreshProjectsAndSessions；
+        // 这里把对话投影切回"新对话"空态（旧项目的会话不再属于当前视图）。
+        startNewChat()
+    }
+
+    /** 新建项目（沙箱目录与项目同生）；不切换当前项目。 */
+    fun createProject(name: String) {
+        if (_uiState.value.running) return
+        viewModelScope.launch(ioDispatcher) {
+            projectStore.create(name).fold(
+                onSuccess = { refreshProjectsAndSessions() },
+                onFailure = { e -> _uiState.update { it.copy(runError = e.message ?: "新建项目失败") } }
             )
         }
     }
@@ -123,13 +183,31 @@ class AgentViewModel(
         }
     }
 
-    /** 抽屉打开时的会话列表刷新入口。 */
+    /** 抽屉打开时的会话列表刷新入口（只列当前项目的会话）。 */
     fun refreshSessions() {
         viewModelScope.launch(ioDispatcher) {
-            val sessions = repository()?.listSessions().orEmpty()
-            _uiState.update { it.copy(sessions = sessions) }
+            refreshProjectsAndSessions()
         }
     }
+
+    private suspend fun refreshProjectsAndSessions() {
+        val all = repository()?.listSessions().orEmpty()
+        _uiState.update {
+            val filtered = sessionsFor(all, it.currentProjectId)
+            it.copy(
+                projects = projectStore.list(),
+                currentProjectId = projectStore.currentId(),
+                sessions = filtered
+            )
+        }
+    }
+
+    private fun sessionsForCurrentProject(all: List<SessionRecord>): List<SessionRecord> =
+        sessionsFor(all, _uiState.value.currentProjectId)
+
+    /** pre-v1.3 行（projectId=null）按默认项目归属渲染，绝不悬空。 */
+    private fun sessionsFor(all: List<SessionRecord>, projectId: String): List<SessionRecord> =
+        all.filter { (it.projectId ?: ProjectLogic.DEFAULT_PROJECT_ID) == projectId }
 
     // ----- 输入与运行 -----
 
@@ -214,6 +292,19 @@ class AgentViewModel(
 
     // ----- 服务商 / 模型选择 -----
 
+    /** 配置外部变更（agent 自改）后的选择态同步。 */
+    private fun refreshSelection() {
+        val selection = owner.selection()
+        _uiState.update {
+            it.copy(
+                providerAccounts = owner.accounts(),
+                activeProviderId = selection?.providerId,
+                activeModel = selection?.model.orEmpty(),
+                modelConfigured = selection != null && selection.model.isNotBlank()
+            )
+        }
+    }
+
     /** 顶栏动态切换模型：运行中拒绝（切换会重建运行时，打断当前 run）。 */
     fun selectModel(providerId: String, model: String) {
         if (_uiState.value.running) {
@@ -269,7 +360,7 @@ class AgentViewModel(
 
     private suspend fun createSessionFor(prompt: String): String {
         val title = prompt.lineSequence().firstOrNull().orEmpty().take(24).ifBlank { "新对话" }
-        val record = repository()?.createSession(title)
+        val record = repository()?.createSession(title, _uiState.value.currentProjectId)
             ?: throw IllegalStateException("Runtime unavailable")
         _uiState.update {
             it.copy(
@@ -331,6 +422,9 @@ class AgentViewModel(
             is AgentStepEvent.FollowUpInjected -> Unit
 
             is AgentStepEvent.Completed -> {
+                // agent 可能在 run 内改过配置：落地待重建的变更（下一轮 run 生效）。
+                owner.rebuildRuntimeIfNeeded()
+                refreshSelection()
                 _uiState.update { it.copy(running = false) }
                 refreshConversation()
                 refreshTodos()
@@ -338,6 +432,7 @@ class AgentViewModel(
             }
 
             is AgentStepEvent.Failed -> {
+                owner.rebuildRuntimeIfNeeded()
                 _uiState.update {
                     it.copy(running = false, runError = event.cause.message ?: event.cause::class.simpleName)
                 }

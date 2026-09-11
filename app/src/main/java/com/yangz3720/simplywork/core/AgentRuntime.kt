@@ -14,6 +14,7 @@ import com.yangz3720.simplywork.core.agent.SkillInjector
 import com.yangz3720.simplywork.core.agent.TokenEstimator
 import com.yangz3720.simplywork.core.agent.HeuristicTokenEstimator
 import com.yangz3720.simplywork.core.agent.tool.AgentToolRegistry
+import com.yangz3720.simplywork.core.agent.tool.RegisteredTool
 import com.yangz3720.simplywork.core.agent.tool.SystemOpsToolAdapter
 import com.yangz3720.simplywork.core.agent.tool.TodoTool
 import com.yangz3720.simplywork.core.session.SessionRepository
@@ -54,12 +55,13 @@ class AgentRuntime private constructor(
             config: AgentConfig = AgentConfig(),
             estimator: TokenEstimator = HeuristicTokenEstimator(),
             skillInjector: SkillInjector = SkillInjector.None,
-            approvalHandler: AuditApprovalHandler = AuditApprovalHandler.AutoApprove
+            approvalHandler: AuditApprovalHandler = AuditApprovalHandler.AutoApprove,
+            selfOps: ((repository: SessionRepository) -> List<RegisteredTool>)? = null
         ): AgentRuntime {
             val baseDir = File(context.filesDir, "agent").apply { mkdirs() }
             val structureStore: SessionStore = SqliteSessionStore(context, "sessions.db")
             val payloadStore = JsonlPayloadStore(File(baseDir, "payloads"))
-            return createWithStores(structureStore, payloadStore, provider, router, config, estimator, skillInjector, approvalHandler = approvalHandler)
+            return createWithStores(structureStore, payloadStore, provider, router, config, estimator, skillInjector, approvalHandler = approvalHandler, selfOps = selfOps)
         }
 
         /**
@@ -74,12 +76,15 @@ class AgentRuntime private constructor(
             estimator: TokenEstimator = HeuristicTokenEstimator(),
             skillInjector: SkillInjector = SkillInjector.None,
             summarizer: com.yangz3720.simplywork.core.agent.Summarizer = ModelSummarizer(provider),
-            approvalHandler: AuditApprovalHandler = AuditApprovalHandler.AutoApprove
+            approvalHandler: AuditApprovalHandler = AuditApprovalHandler.AutoApprove,
+            // v1.3 自操作工具（self_* / fs_* / project）：AppContainer 注入缝；缺省不注册（单元测试零改动）。
+            selfOps: ((repository: SessionRepository) -> List<RegisteredTool>)? = null
         ): AgentRuntime {
             val repository = SessionRepositoryImpl(structureStore, payloadStore)
             val registry = AgentToolRegistry()
             SystemOpsToolAdapter.registerAll(registry, router)
             registry.register(TodoTool.registeredTool(repository))
+            selfOps?.invoke(repository)?.forEach(registry::register)
 
             val queue = MessageQueueManager()
             val auditGate = AuditGatePipeline(registry, approvalHandler = approvalHandler, maxToolResultChars = config.maxToolResultChars)

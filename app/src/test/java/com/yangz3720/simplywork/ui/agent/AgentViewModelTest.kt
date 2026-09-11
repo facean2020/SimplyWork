@@ -1,6 +1,9 @@
 package com.yangz3720.simplywork.ui.agent
 
+import android.content.SharedPreferences
 import com.yangz3720.simplywork.core.AgentRuntime
+import com.yangz3720.simplywork.core.session.ProjectStore
+import com.yangz3720.simplywork.testsupport.InMemoryPrefs
 import com.yangz3720.simplywork.core.session.TodoStatus
 import com.yangz3720.simplywork.core.session.store.InMemoryPayloadStore
 import com.yangz3720.simplywork.core.session.store.InMemorySessionStore
@@ -18,6 +21,7 @@ import com.yangz3720.simplywork.infrastructure.systemops.SystemOperationRouter
 import io.mockk.mockk
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import org.junit.After
@@ -51,6 +55,8 @@ class AgentViewModelTest {
 
     // ----- fakes -----
 
+    private fun fakeProjects(): ProjectStore = ProjectStore(InMemoryPrefs())
+
     private class FakeOwner(var runtime: AgentRuntime?) : AgentRuntimeOwner {
         val accounts = ModelProviderPresets.ALL.toMutableList()
         var selection: ModelSelection? = null
@@ -58,11 +64,14 @@ class AgentViewModelTest {
         var savedKey: Pair<String, String>? = null
         var appliedSelection: ModelSelection? = null
         var fetchedAccount: ProviderAccount? = null
+        var rebuilds: Int = 0
+        override val configVersion = MutableStateFlow(0)
 
         override fun current(): AgentRuntime? = runtime
         override fun accounts(): List<ProviderAccount> = accounts
         override fun selection(): ModelSelection? = selection
         override fun timeoutMs(): Long = currentTimeout
+        override fun rebuildRuntimeIfNeeded() { rebuilds += 1 }
         override fun saveAccountKey(accountId: String, apiKey: String) { savedKey = accountId to apiKey }
         override fun upsertCustomAccount(name: String, baseUrl: String, apiKey: String) =
             ProviderAccount(id = "custom-x", name = name, baseUrl = baseUrl, apiKey = apiKey)
@@ -157,7 +166,7 @@ class AgentViewModelTest {
     )
 
     private fun viewModel(runtime: AgentRuntime): AgentViewModel =
-        AgentViewModel(FakeOwner(runtime), ApprovalCoordinator(), PermissionCoordinator())
+        AgentViewModel(FakeOwner(runtime), ApprovalCoordinator(), PermissionCoordinator(), fakeProjects())
 
     /** 真实时间轮询：等待谓词成立或超时。 */
     private fun waitFor(timeoutMs: Long = 8000, predicate: () -> Boolean) {
@@ -277,7 +286,7 @@ class AgentViewModelTest {
     @Test
     fun `selectModel applies selection through owner and updates state`() {
         val owner = FakeOwner(null)
-        val vm = AgentViewModel(owner, ApprovalCoordinator(), PermissionCoordinator())
+        val vm = AgentViewModel(owner, ApprovalCoordinator(), PermissionCoordinator(), fakeProjects())
         Thread.sleep(100) // init 完成后状态稳定
 
         vm.selectModel("deepseek", "  deepseek-chat  ")
@@ -290,7 +299,7 @@ class AgentViewModelTest {
     @Test
     fun `selectModel is rejected while running`() {
         val owner = FakeOwner(buildRuntime(HangingProvider()))
-        val vm = AgentViewModel(owner, ApprovalCoordinator(), PermissionCoordinator())
+        val vm = AgentViewModel(owner, ApprovalCoordinator(), PermissionCoordinator(), fakeProjects())
 
         vm.send("hi")
         waitFor { vm.uiState.value.running }
@@ -304,7 +313,7 @@ class AgentViewModelTest {
     @Test
     fun `fetchModels delegates to owner with account`() = kotlinx.coroutines.runBlocking {
         val owner = FakeOwner(null)
-        val vm = AgentViewModel(owner, ApprovalCoordinator(), PermissionCoordinator())
+        val vm = AgentViewModel(owner, ApprovalCoordinator(), PermissionCoordinator(), fakeProjects())
         val account = ProviderAccount(id = "openrouter", name = "OpenRouter", baseUrl = "https://openrouter.ai/api/v1")
 
         val result = vm.fetchModels(account)

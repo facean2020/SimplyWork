@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -69,6 +70,7 @@ fun AgentScreen(
     var draft by remember { mutableStateOf("") }
     var showTodos by remember { mutableStateOf(false) }
     var showModelPicker by remember { mutableStateOf(false) }
+    var showProjects by remember { mutableStateOf(false) }
     var editingMessage by remember { mutableStateOf<UiMessage?>(null) }
 
     val activeAccount = state.providerAccounts.firstOrNull { it.id == state.activeProviderId }
@@ -100,6 +102,43 @@ fun AgentScreen(
         drawerState = drawerState,
         drawerContent = {
             ModalDrawerSheet(drawerContainerColor = MaterialTheme.colorScheme.background) {
+                // v1.3 项目区：当前项目 + 切换/新建入口（会话列表已按项目过滤）。
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { showProjects = true }
+                        .padding(horizontal = 20.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Filled.List,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Column(modifier = Modifier
+                        .padding(start = 10.dp)
+                        .weight(1f)) {
+                        Text(
+                            text = state.projects.firstOrNull { it.id == state.currentProjectId }?.name ?: "项目",
+                            style = MaterialTheme.typography.titleSmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = "会话与沙箱按项目隔离 · 点按切换",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Icon(
+                        Icons.Filled.KeyboardArrowDown,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
                 SessionDrawer(
                     sessions = state.sessions,
                     currentSessionId = state.currentSessionId,
@@ -227,6 +266,21 @@ fun AgentScreen(
             fetchModels = { account -> viewModel.fetchModels(account) },
             onSelect = { providerId, model -> viewModel.selectModel(providerId, model) },
             onDismiss = { showModelPicker = false }
+        )
+    }
+
+    // v1.3 项目切换/新建弹层（从会话抽屉进入）。
+    if (showProjects) {
+        ProjectSheet(
+            projects = state.projects,
+            currentProjectId = state.currentProjectId,
+            onSelect = {
+                viewModel.switchProject(it)
+                showProjects = false
+                scope.launch { drawerState.close() }
+            },
+            onCreate = { viewModel.createProject(it) },
+            onDismiss = { showProjects = false }
         )
     }
 }

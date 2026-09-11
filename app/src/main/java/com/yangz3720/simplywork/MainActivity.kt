@@ -23,7 +23,8 @@ class MainActivity : ComponentActivity() {
                     AgentViewModel(
                         container,
                         container.approvalCoordinator,
-                        container.permissionCoordinator
+                        container.permissionCoordinator,
+                        container.projectStore
                     ) as T
             }
         )[AgentViewModel::class.java]

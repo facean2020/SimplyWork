@@ -288,6 +288,7 @@ class AgentToolRegistry { fun register(t) / get(name) / definitions() }
 ```
 
 - 对齐 `appfunction-design.md` §6.1：`SystemToolEntry` 携带 dangerLevel 的形状即 Registry-lite 条目形状；tool-core 落地后整体迁出。
+- **v1.3 工具族账目**：`sys_*` 13 个（§5 全走 Router）+ `todo_write`（State Memory 唯一写入口）+ **v1.3 自操作 10 个**（`self_config_read` / `self_config_update` / `self_session_read` / `self_project_create` / `fs_list` / `fs_read` / `fs_write` / `fs_mkdir` / `fs_move` / `fs_delete`，经 `AgentRuntime.createWithStores(selfOps = …)` 注入注册，缺省不注册保测试零改动）= 注册表 24 个工具。
 
 ### 8.2 Pre-Tool Audit Gate（决策表）
 

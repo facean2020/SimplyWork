@@ -1,5 +1,7 @@
 package com.yangz3720.simplywork.ui.agent
 
+import com.yangz3720.simplywork.core.session.Project
+import com.yangz3720.simplywork.core.session.ProjectLogic
 import com.yangz3720.simplywork.core.session.SessionRecord
 import com.yangz3720.simplywork.core.session.TodoItem
 import com.yangz3720.simplywork.infrastructure.model.config.ProviderAccount
@@ -87,6 +89,10 @@ data class AgentUiState(
     /** 当前选中的服务商 + 模型（对话屏顶栏显示与动态切换）。 */
     val activeProviderId: String? = null,
     val activeModel: String = "",
+
+    /** 项目列表 + 当前项目（v1.3）：会话过滤 + fs_* 沙箱默认目录。 */
+    val projects: List<Project> = emptyList(),
+    val currentProjectId: String = ProjectLogic.DEFAULT_PROJECT_ID,
 
     val modelConfigured: Boolean = true
 )

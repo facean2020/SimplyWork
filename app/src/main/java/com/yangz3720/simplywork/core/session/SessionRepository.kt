@@ -19,7 +19,8 @@ import kotlinx.serialization.json.jsonObject
  */
 interface SessionRepository {
 
-    suspend fun createSession(title: String): SessionRecord
+    /** [projectId] = owning project (v1.3); null kept for callers that predate projects. */
+    suspend fun createSession(title: String, projectId: String? = null): SessionRecord
 
     fun getSession(sessionId: String): SessionRecord?
 
@@ -92,11 +93,12 @@ class SessionRepositoryImpl(
     private val mutex = Mutex()
     private val json = Json { ignoreUnknownKeys = true }
 
-    override suspend fun createSession(title: String): SessionRecord {
+    override suspend fun createSession(title: String, projectId: String?): SessionRecord {
         val record = SessionRecord(
             id = UUID.randomUUID().toString(),
             title = title.take(TITLE_MAX_LENGTH),
-            createdAt = System.currentTimeMillis()
+            createdAt = System.currentTimeMillis(),
+            projectId = projectId
         )
         mutex.withLock { structureStore.insertSession(record) }
         return record
