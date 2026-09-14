@@ -6,9 +6,11 @@ import kotlinx.serialization.json.JsonObject
 
 /**
  * Per-execution context handed to tool runners: identifies the session the call
- * belongs to (tools that mutate session state, e.g. todo_write, need it).
+ * belongs to (tools that mutate session state, e.g. todo_write, need it) and the
+ * call itself — v1.5: fs_* records its change under [toolCallId], which is how the
+ * diff card lands under the matching entry in the conversation.
  */
-data class ToolExecutionContext(val sessionId: String)
+data class ToolExecutionContext(val sessionId: String, val toolCallId: String = "")
 
 /**
  * One registered executable tool — the Registry-lite transitional shape that maps

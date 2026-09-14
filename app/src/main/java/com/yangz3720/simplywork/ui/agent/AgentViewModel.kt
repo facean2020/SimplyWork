@@ -1,13 +1,20 @@
 package com.yangz3720.simplywork.ui.agent
 
+import android.app.Activity
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.yangz3720.simplywork.core.AgentRuntime
 import com.yangz3720.simplywork.core.agent.AgentStepEvent
 import com.yangz3720.simplywork.core.agent.IncomingMessage
+import com.yangz3720.simplywork.core.cloud.CloudFolder
+import com.yangz3720.simplywork.core.cloud.OneDriveOwner
 import com.yangz3720.simplywork.core.session.ProjectLogic
 import com.yangz3720.simplywork.core.session.ProjectStore
 import com.yangz3720.simplywork.core.session.SessionRecord
+import com.yangz3720.simplywork.core.workspace.FileChange
+import com.yangz3720.simplywork.core.workspace.FileChangeKind
+import com.yangz3720.simplywork.core.workspace.FileKinds
+import com.yangz3720.simplywork.core.workspace.ProjectFilesOwner
 import com.yangz3720.simplywork.infrastructure.model.config.ProviderAccount
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -81,6 +88,10 @@ class AgentViewModel(
     val permissionCoordinator: PermissionCoordinator,
     /** 项目注册表（v1.3）：会话归属 + 沙箱目录；UI 与 agent 共用同一实例。 */
     private val projectStore: ProjectStore,
+    /** OneDrive 接缝（v1.4）：账号、云端文件夹浏览、镜像同步。 */
+    private val oneDrive: OneDriveOwner,
+    /** 项目文件接缝（v1.5）：只读浏览/预览 + 会话改动记录。 */
+    private val projectFiles: ProjectFilesOwner,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : ViewModel() {
 
@@ -128,6 +139,23 @@ class AgentViewModel(
         viewModelScope.launch(ioDispatcher) {
             projectStore.changes.drop(1).collect { refreshProjectsAndSessions() }
         }
+        // OneDrive（v1.4）：启动时恢复已登录账号，并把账号/同步状态透出给 UI。
+        viewModelScope.launch(ioDispatcher) {
+            oneDrive.restore()
+            _uiState.update {
+                it.copy(oneDriveAccount = oneDrive.account.value, oneDriveConfigured = oneDrive.configured)
+            }
+            // 已绑定的当前项目：进入即懒惰拉取一次（带节流，冷启动必然超过间隔）。
+            oneDrive.sync(_uiState.value.currentProjectId, throttled = true)
+        }
+        viewModelScope.launch(ioDispatcher) {
+            oneDrive.account.collect { acc ->
+                _uiState.update { it.copy(oneDriveAccount = acc, oneDriveConfigured = oneDrive.configured) }
+            }
+        }
+        viewModelScope.launch(ioDispatcher) {
+            oneDrive.syncState.collect { state -> _uiState.update { it.copy(syncState = state) } }
+        }
     }
 
     // ----- 会话管理 -----
@@ -135,12 +163,19 @@ class AgentViewModel(
     /** ChatGPT 式新对话：清空当前投影；会话在首条消息发送时才落库（归属当前项目）。 */
     fun startNewChat() {
         runJob?.cancel()
+        // 用 copy 而不是重建：只清会话投影，服务商/项目/OneDrive 等横向状态全部保留
+        // （重建式的写法会在新增状态字段时静默丢字段）。
         _uiState.update { current ->
-            AgentUiState(
-                sessions = current.sessions,
-                modelConfigured = current.modelConfigured,
-                projects = current.projects,
-                currentProjectId = current.currentProjectId
+            current.copy(
+                currentSessionId = null,
+                currentTitle = null,
+                messages = emptyList(),
+                running = false,
+                iteration = 0,
+                runError = null,
+                todos = emptyList(),
+                // 新增文件卡片属于"这个会话产出了什么"，换会话就没有了。
+                newFiles = emptyList()
             )
         }
     }
@@ -160,6 +195,10 @@ class AgentViewModel(
         // switchTo 触发 projectStore.changes → refreshProjectsAndSessions；
         // 这里把对话投影切回"新对话"空态（旧项目的会话不再属于当前视图）。
         startNewChat()
+        // 文件浏览器指向上一个项目的目录了，回落根目录（下次打开重新列）。
+        _uiState.update { it.copy(filePath = "", fileEntries = emptyList(), filesError = null, filePreview = null) }
+        // 进入项目即懒惰拉取一次（节流在 owner 侧；10 分钟内不重复打网络）。
+        viewModelScope.launch(ioDispatcher) { oneDrive.sync(projectId, throttled = true) }
     }
 
     /** 新建项目（沙箱目录与项目同生）；不切换当前项目。 */
@@ -169,6 +208,161 @@ class AgentViewModel(
             projectStore.create(name).fold(
                 onSuccess = { refreshProjectsAndSessions() },
                 onFailure = { e -> _uiState.update { it.copy(runError = e.message ?: "新建项目失败") } }
+            )
+        }
+    }
+
+    // ----- OneDrive（v1.4）：账号 / 文件夹浏览 / 绑定 / 同步 -----
+
+    /**
+     * 交互式登录（[activity] 由 UI 从 LocalActivity 传入，MSAL 用它拉起授权页）。
+     * 允许 null 并显式报错：静默不响应点击比报错更难排查（P2）。
+     */
+    fun connectOneDrive(activity: Activity?) {
+        if (activity == null) {
+            _uiState.update { it.copy(cloudError = "无法获取当前 Activity，请重新打开页面后再试") }
+            return
+        }
+        viewModelScope.launch(ioDispatcher) {
+            oneDrive.connect(activity).onFailure { e ->
+                _uiState.update { it.copy(cloudError = e.message ?: "OneDrive 登录失败") }
+            }
+        }
+    }
+
+    /** 登出；只清账号，不动任何绑定与本地文件。 */
+    fun disconnectOneDrive() {
+        viewModelScope.launch(ioDispatcher) { oneDrive.disconnect() }
+    }
+
+    /** 打开/下钻云端文件夹选择器。[parentId] = "root" 表示网盘根。 */
+    fun browseCloudFolders(parentId: String, parentPath: String) {
+        _uiState.update { it.copy(cloudBusy = true, cloudError = null) }
+        viewModelScope.launch(ioDispatcher) {
+            oneDrive.listFolders(parentId, parentPath).fold(
+                onSuccess = { folders -> _uiState.update { it.copy(cloudFolders = folders, cloudBusy = false) } },
+                onFailure = { e ->
+                    _uiState.update { it.copy(cloudBusy = false, cloudError = e.message ?: "无法读取云端文件夹") }
+                }
+            )
+        }
+    }
+
+    /** 绑定到云端文件夹：owner 侧先做一次首轮对齐（空项目拉取 / 有内容则上传）。 */
+    fun bindCloudFolder(projectId: String, folder: CloudFolder) {
+        // 重试时先清掉上一条错误，否则旧提示会和新结果并排显示。
+        _uiState.update { it.copy(cloudError = null) }
+        viewModelScope.launch(ioDispatcher) {
+            oneDrive.bindFolder(projectId, folder).onFailure { e ->
+                _uiState.update { it.copy(cloudError = e.message ?: "同步失败") }
+            }
+        }
+    }
+
+    /** 在云端新建文件夹并绑定。 */
+    fun createCloudFolderAndBind(projectId: String, parentId: String, parentPath: String, name: String) {
+        _uiState.update { it.copy(cloudError = null) }
+        viewModelScope.launch(ioDispatcher) {
+            oneDrive.createAndBindFolder(projectId, parentId, parentPath, name).onFailure { e ->
+                _uiState.update { it.copy(cloudError = e.message ?: "新建文件夹失败") }
+            }
+        }
+    }
+
+    fun unbindCloud(projectId: String) {
+        viewModelScope.launch(ioDispatcher) {
+            oneDrive.unbind(projectId).onFailure { e ->
+                _uiState.update { it.copy(cloudError = e.message ?: "取消关联失败") }
+            }
+        }
+    }
+
+    /** 用户显式"立即同步"：跳过节流。运行中拒绝（同步会与 run 争抢同一份工作区）。 */
+    fun syncCloudNow(projectId: String) {
+        if (_uiState.value.running) {
+            _uiState.update { it.copy(cloudError = "正在运行中，请先停止当前任务再同步") }
+            return
+        }
+        viewModelScope.launch(ioDispatcher) { oneDrive.sync(projectId, throttled = false) }
+    }
+
+    fun dismissCloudError() {
+        _uiState.update { it.copy(cloudError = null) }
+    }
+
+    // ----- 项目文件（v1.5）：只读浏览 / 预览 -----
+
+    /** 打开文件管理器：回到项目根目录。 */
+    fun openProjectFiles() {
+        loadFileDir("")
+    }
+
+    /** 进入子目录（[path] 相对项目根）。 */
+    fun openFileDir(path: String) {
+        loadFileDir(path)
+    }
+
+    /** 返回上一层（根目录上是 no-op；UI 在根目录不渲染返回键）。 */
+    fun fileDirUp() {
+        val current = _uiState.value.filePath
+        if (current.isEmpty()) return
+        loadFileDir(current.substringBeforeLast('/', ""))
+    }
+
+    /**
+     * 预览文件。会话底部的「新增文件」卡片与文件管理器共用这一个入口 —— 从哪儿进来
+     * 都是同一个页面、同一份内容，不存在两套预览逻辑。
+     *
+     * 二进制靠内容里的 NUL 字节判定（比扩展名白名单可靠）：不渲染乱码，直说类型不支持。
+     */
+    fun openFilePreview(path: String) {
+        val projectId = _uiState.value.currentProjectId
+        viewModelScope.launch(ioDispatcher) {
+            val preview = projectFiles.read(projectId, path).fold(
+                onSuccess = { content ->
+                    val binary = content.content.contains('\u0000')
+                    FilePreview(
+                        path = path,
+                        markdown = !binary && FileKinds.isMarkdown(path),
+                        text = content.content.takeIf { !binary },
+                        notice = when {
+                            binary -> "无法预览此类型"
+                            content.truncated -> "文件较大，仅显示开头部分"
+                            else -> null
+                        },
+                        truncated = content.truncated,
+                        sizeBytes = content.sizeBytes
+                    )
+                },
+                onFailure = { FilePreview(path = path, notice = "无法读取该文件") }
+            )
+            _uiState.update { it.copy(filePreview = preview) }
+        }
+    }
+
+    fun closeFilePreview() {
+        _uiState.update { it.copy(filePreview = null) }
+    }
+
+    fun dismissFilesError() {
+        _uiState.update { it.copy(filesError = null) }
+    }
+
+    private fun loadFileDir(path: String) {
+        val projectId = _uiState.value.currentProjectId
+        _uiState.update { it.copy(filePath = path, filesBusy = true, filesError = null) }
+        viewModelScope.launch(ioDispatcher) {
+            projectFiles.list(projectId, path).fold(
+                onSuccess = { listing ->
+                    _uiState.update { it.copy(fileEntries = listing.entries, filesBusy = false) }
+                },
+                onFailure = {
+                    // 失败原因（路径逃逸 / 非目录）对用户没有操作价值，只报"读不到"，
+                    // 目录树留空 —— 比留一屏过期条目诚实。
+                    _uiState.update {
+                        it.copy(fileEntries = emptyList(), filesBusy = false, filesError = "无法读取该目录")
+                    }
+                }
             )
         }
     }
@@ -429,6 +623,8 @@ class AgentViewModel(
                 refreshConversation()
                 refreshTodos()
                 refreshSessions()
+                // 懒惰推送：本轮可能写过工作区，把产出送上云端。只推不拉；无改动时零网络。
+                oneDrive.pushAfterRun(_uiState.value.currentProjectId)
             }
 
             is AgentStepEvent.Failed -> {
@@ -447,9 +643,28 @@ class AgentViewModel(
         val repository = repository() ?: return
         val path = withContext(ioDispatcher) { repository.activePath(sessionId) }
         val allNodes = withContext(ioDispatcher) { repository.listNodes(sessionId) }
-        val messages = ConversationRenderer.render(path, allNodes) { node -> repository.payload(node) }
+        // 改动记录与节点同源：投影会话时一并把 diff 贴回对应工具条目（v1.5）。
+        val changes = withContext(ioDispatcher) { projectFiles.changes(sessionId) }
+        val messages = ConversationRenderer.render(path, allNodes, changes) { node -> repository.payload(node) }
         val title = withContext(ioDispatcher) { repository.getSession(sessionId)?.title }
-        _uiState.update { it.copy(messages = messages, currentTitle = title ?: it.currentTitle) }
+        _uiState.update {
+            it.copy(messages = messages, currentTitle = title ?: it.currentTitle, newFiles = newFilesOf(changes))
+        }
+    }
+
+    /**
+     * 底部「新增文件」卡片的数据：本会话新建、且**此刻仍然存在**的文件，同一路径重复创建
+     * 只留最新一笔。被删掉/移走的文件不留在卡片里 —— 点进去是 404 的入口不如没有。
+     */
+    private fun newFilesOf(changes: List<FileChange>): List<FileChange> {
+        if (changes.isEmpty()) return emptyList()
+        val gone = changes
+            .filter { it.kind == FileChangeKind.Deleted || it.kind == FileChangeKind.Moved }
+            .flatMap { listOfNotNull(it.path, it.toPath) }
+            .toSet()
+        return changes.asReversed()
+            .filter { it.kind == FileChangeKind.Created && it.path !in gone }
+            .distinctBy { it.path }
     }
 
     private suspend fun refreshTodos() {

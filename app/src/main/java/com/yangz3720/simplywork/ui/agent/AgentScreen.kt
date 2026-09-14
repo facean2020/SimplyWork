@@ -1,5 +1,6 @@
 package com.yangz3720.simplywork.ui.agent
 
+import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.List
@@ -45,6 +47,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.yangz3720.simplywork.core.session.Project
 import com.yangz3720.simplywork.core.session.SessionRecord
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -60,17 +63,21 @@ import kotlinx.coroutines.launch
 @Composable
 fun AgentScreen(
     viewModel: AgentViewModel,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    onOpenFiles: () -> Unit
 ) {
     val state by viewModel.uiState.collectAsState()
     val approval by viewModel.approval.collectAsState()
 
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    // MSAL 的交互式登录需要一个 Activity 来拉起授权页；Compose 侧从这里取。
+    val activity = LocalActivity.current
     var draft by remember { mutableStateOf("") }
     var showTodos by remember { mutableStateOf(false) }
     var showModelPicker by remember { mutableStateOf(false) }
     var showProjects by remember { mutableStateOf(false) }
+    var oneDriveTarget by remember { mutableStateOf<Project?>(null) }
     var editingMessage by remember { mutableStateOf<UiMessage?>(null) }
 
     val activeAccount = state.providerAccounts.firstOrNull { it.id == state.activeProviderId }
@@ -126,13 +133,35 @@ fun AgentScreen(
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = "会话与沙箱按项目隔离 · 点按切换",
+                            text = "点按切换项目",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                     Icon(
                         Icons.Filled.KeyboardArrowDown,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                // v1.5 项目文件：当前项目沙箱的只读浏览入口。缩进到项目名下方，读作项目的子动作。
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onOpenFiles() }
+                        .padding(start = 48.dp, end = 20.dp, top = 2.dp, bottom = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "项目文件",
+                        style = MaterialTheme.typography.bodyLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Icon(
+                        Icons.AutoMirrored.Filled.KeyboardArrowRight,
                         contentDescription = null,
                         modifier = Modifier.size(18.dp),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
@@ -221,17 +250,28 @@ fun AgentScreen(
                 )
             }
         ) { innerPadding ->
-            Box(modifier = Modifier.padding(innerPadding).fillMaxWidth()) {
-                if (state.messages.isEmpty()) {
-                    EmptyState(
-                        onSuggestion = { draft = it },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                } else {
-                    ConversationList(
-                        messages = state.messages,
-                        onEditUser = startEdit,
-                        onSwitchBranch = { message, direction -> viewModel.switchBranch(message.id, direction) }
+            // 会话流占满剩余高度，底部「新增文件」卡片（v1.5）钉在输入条正上方 ——
+            // 放 content 区而不是 bottomBar：输入条自带 imePadding，再叠一层会把卡片
+            // 顶到键盘后面；放这里键盘弹起时它跟着内容区一起被压缩，永远可见。
+            Column(modifier = Modifier.padding(innerPadding).fillMaxWidth()) {
+                Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    if (state.messages.isEmpty()) {
+                        EmptyState(
+                            onSuggestion = { draft = it },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else {
+                        ConversationList(
+                            messages = state.messages,
+                            onEditUser = startEdit,
+                            onSwitchBranch = { message, direction -> viewModel.switchBranch(message.id, direction) }
+                        )
+                    }
+                }
+                if (state.newFiles.isNotEmpty()) {
+                    NewFilesCard(
+                        files = state.newFiles,
+                        onOpen = { viewModel.openFilePreview(it) }
                     )
                 }
             }
@@ -280,7 +320,37 @@ fun AgentScreen(
                 scope.launch { drawerState.close() }
             },
             onCreate = { viewModel.createProject(it) },
+            onOpenOneDrive = { project ->
+                // 两个 ModalBottomSheet 不能同时常驻：先收起项目弹层再开云端弹层。
+                showProjects = false
+                oneDriveTarget = project
+            },
             onDismiss = { showProjects = false }
+        )
+    }
+
+    // v1.4 OneDrive 绑定面板；project 每帧从最新列表解析，绑定完成即时反映状态。
+    oneDriveTarget?.let { target ->
+        val project = state.projects.firstOrNull { it.id == target.id } ?: target
+        OneDriveSheet(
+            project = project,
+            account = state.oneDriveAccount,
+            configured = state.oneDriveConfigured,
+            syncState = state.syncState,
+            folders = state.cloudFolders,
+            busy = state.cloudBusy,
+            error = state.cloudError,
+            onBrowse = { parentId, parentPath -> viewModel.browseCloudFolders(parentId, parentPath) },
+            onConnect = { viewModel.connectOneDrive(activity) },
+            onDisconnect = { viewModel.disconnectOneDrive() },
+            onBind = { folder -> viewModel.bindCloudFolder(project.id, folder) },
+            onCreateAndBind = { parentId, parentPath, name ->
+                viewModel.createCloudFolderAndBind(project.id, parentId, parentPath, name)
+            },
+            onSyncNow = { viewModel.syncCloudNow(project.id) },
+            onUnbind = { viewModel.unbindCloud(project.id) },
+            onDismissError = { viewModel.dismissCloudError() },
+            onDismiss = { oneDriveTarget = null }
         )
     }
 }

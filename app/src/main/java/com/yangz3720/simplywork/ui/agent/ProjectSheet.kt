@@ -35,6 +35,9 @@ import com.yangz3720.simplywork.core.session.Project
 /**
  * 项目切换/新建弹层（v1.3，参考 Qwen Studio 建档）：列项目（当前项打勾）、
  * 点选切换、底部输入新建。新建不切换当前项目（与 agent 工具语义一致）。
+ *
+ * v1.4：每行右侧多一个云端入口（[onOpenOneDrive]），文案随绑定状态变化 ——
+ * 用文字而不是新增图标，避免为了一个状态再引一套图标依赖。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -43,6 +46,7 @@ fun ProjectSheet(
     currentProjectId: String,
     onSelect: (String) -> Unit,
     onCreate: (String) -> Unit,
+    onOpenOneDrive: (Project) -> Unit,
     onDismiss: () -> Unit
 ) {
     var draft by remember { mutableStateOf("") }
@@ -53,7 +57,7 @@ fun ProjectSheet(
         Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {
             Text("项目", style = MaterialTheme.typography.titleMedium)
             Text(
-                "每个项目有独立的会话记录与沙箱工作空间；Agent 的 fs_* 工具默认作用于当前项目",
+                "各项目的会话与文件相互独立",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
@@ -65,7 +69,7 @@ fun ProjectSheet(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { onSelect(project.id) }
-                            .padding(vertical = 10.dp),
+                            .padding(vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
@@ -86,8 +90,14 @@ fun ProjectSheet(
                                 .padding(start = 10.dp)
                                 .weight(1f)
                         )
-                        if (selected) {
-                            Text("当前", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                        TextButton(onClick = { onOpenOneDrive(project) }) {
+                            val bound = project.oneDrive != null
+                            Text(
+                                text = if (bound) "已连接" else "云端",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = if (bound) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                     }
                 }

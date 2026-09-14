@@ -6,9 +6,15 @@ import com.yangz3720.simplywork.core.AgentRuntime
 import com.yangz3720.simplywork.core.agent.AuditApprovalHandler
 import com.yangz3720.simplywork.core.agent.tool.AgentSelfConfig
 import com.yangz3720.simplywork.core.agent.tool.SelfOpsTools
+import com.yangz3720.simplywork.core.cloud.OneDriveOwner
 import com.yangz3720.simplywork.core.session.ProjectStore
 import com.yangz3720.simplywork.core.workspace.AgentWorkspace
+import com.yangz3720.simplywork.core.workspace.FileChangeLog
+import com.yangz3720.simplywork.core.workspace.JsonFileChangeLog
+import com.yangz3720.simplywork.core.workspace.LocalProjectFiles
+import com.yangz3720.simplywork.core.workspace.ProjectFilesOwner
 import com.yangz3720.simplywork.KeyringState
+import com.yangz3720.simplywork.infrastructure.cloud.onedrive.OneDriveService
 import com.yangz3720.simplywork.infrastructure.model.ModelProvider
 import com.yangz3720.simplywork.infrastructure.model.client.OpenAiCompatibleClient
 import com.yangz3720.simplywork.infrastructure.model.config.ModelConfig
@@ -59,6 +65,26 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
     private val workspace = AgentWorkspace(
         File(appContext.filesDir, "agent_workspace/projects")
     )
+
+    /**
+     * 改动记录（v1.5）：fs_* 每笔改动落一个 JSON 文件（`agent_workspace/changes/<sessionId>.json`）。
+     * 故意**不**进会话 payload store —— 那是喂给模型的原始记录，而差异行只服务 UI，
+     * 不该占上下文预算，也不该让模型看见自己的 diff（它已经有工具结果了）。
+     */
+    private val changeLog: FileChangeLog =
+        JsonFileChangeLog(File(appContext.filesDir, "agent_workspace/changes"))
+
+    /**
+     * 项目文件接缝（v1.5）：只读浏览 / 预览 + 会话改动读取。与 [workspace] 同源，
+     * 所以 UI 看到的目录就是 agent 动手的那个目录。
+     */
+    val projectFiles: ProjectFilesOwner by lazy { LocalProjectFiles(workspace, changeLog) }
+
+    /**
+     * OneDrive 接入（v1.4）：惰性装配 —— 不做任何网络或 MSAL 初始化，只在 App 启动时
+     * 建对象。真正的登录/同步都由 UI 显式触发（"懒惰同步"的入口控制点）。
+     */
+    val oneDrive: OneDriveOwner by lazy { OneDriveService(appContext, projectStore, workspace) }
 
     /** 配置自操作缝（v1.3）：agent 的 self_config_read/update 走这里，与 UI 同源。 */
     private val selfConfig = object : AgentSelfConfig {
@@ -257,7 +283,8 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
                     repository = repository,
                     config = selfConfig,
                     workspace = workspace,
-                    projects = projectStore
+                    projects = projectStore,
+                    changes = changeLog
                 )
             }
         )

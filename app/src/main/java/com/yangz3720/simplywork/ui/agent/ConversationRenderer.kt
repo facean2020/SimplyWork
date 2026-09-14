@@ -1,9 +1,10 @@
 package com.yangz3720.simplywork.ui.agent
 
+import com.yangz3720.simplywork.core.agent.NodePayloads
 import com.yangz3720.simplywork.core.session.SessionNode
 import com.yangz3720.simplywork.core.session.SessionNodeStatus
 import com.yangz3720.simplywork.core.session.SessionNodeType
-import com.yangz3720.simplywork.core.agent.NodePayloads
+import com.yangz3720.simplywork.core.workspace.FileChange
 import com.yangz3720.simplywork.infrastructure.model.model.Message
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -16,13 +17,15 @@ import kotlinx.serialization.json.jsonPrimitive
  * - ToolCall 节点拆为 Assistant 正文 + N 条 ToolActivity；
  * - ToolResult 就近归并到同 toolCallId 的 ToolActivity（孤儿结果独立成条）；
  * - UserPrompt 附分支信息：[allNodes] 中同 parent 的 UserPrompt 兄弟数（编辑重发
- *   产生的多分支，VSCode-Copilot 式）。
+ *   产生的多分支，VSCode-Copilot 式）；
+ * - v1.5：fs_* 的 [changes] 按 toolCallId 贴回对应工具条目（Codex 式 diff 卡片）。
  */
 object ConversationRenderer {
 
     fun render(
         path: List<SessionNode>,
         allNodes: List<SessionNode> = path,
+        changes: List<FileChange> = emptyList(),
         payload: (SessionNode) -> JsonObject
     ): List<UiMessage> {
         val messages = ArrayList<UiMessage>(path.size)
@@ -118,7 +121,22 @@ object ConversationRenderer {
                     )
             }
         }
-        return messages
+        return attachFileChanges(messages, changes)
+    }
+
+    /**
+     * 把改动贴到对应工具条目上（v1.5）。按 toolCallId 精确匹配，一次工具调用最多一笔改动；
+     * 匹配不上的改动**不渲染** —— 贴错位置比不贴更糟（读的人会以为改的是另一个文件）。
+     */
+    private fun attachFileChanges(
+        messages: List<UiMessage>,
+        changes: List<FileChange>
+    ): List<UiMessage> {
+        if (changes.isEmpty() || messages.isEmpty()) return messages
+        val byCall = changes.mapNotNull { change -> change.toolCallId?.let { it to change } }.toMap()
+        return messages.map { message ->
+            byCall[message.toolCallId]?.let { message.copy(fileChange = it) } ?: message
+        }
     }
 
     private fun decodeOrNull(json: JsonObject): Message? = runCatching {

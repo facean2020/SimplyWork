@@ -1,12 +1,28 @@
 package com.yangz3720.simplywork.ui.agent
 
+import android.app.Activity
 import android.content.SharedPreferences
 import com.yangz3720.simplywork.core.AgentRuntime
+import com.yangz3720.simplywork.core.agent.tool.AgentSelfConfig
+import com.yangz3720.simplywork.core.agent.tool.SelfOpsTools
+import com.yangz3720.simplywork.core.cloud.CloudFolder
+import com.yangz3720.simplywork.core.cloud.OneDriveAccount
+import com.yangz3720.simplywork.core.cloud.OneDriveOwner
+import com.yangz3720.simplywork.core.cloud.SyncReport
+import com.yangz3720.simplywork.core.cloud.SyncState
+import com.yangz3720.simplywork.core.session.ProjectLogic
 import com.yangz3720.simplywork.core.session.ProjectStore
 import com.yangz3720.simplywork.testsupport.InMemoryPrefs
 import com.yangz3720.simplywork.core.session.TodoStatus
 import com.yangz3720.simplywork.core.session.store.InMemoryPayloadStore
 import com.yangz3720.simplywork.core.session.store.InMemorySessionStore
+import com.yangz3720.simplywork.core.workspace.AgentWorkspace
+import com.yangz3720.simplywork.core.workspace.FileChange
+import com.yangz3720.simplywork.core.workspace.FileChangeKind
+import com.yangz3720.simplywork.core.workspace.FileChangeLog
+import com.yangz3720.simplywork.core.workspace.InMemoryFileChangeLog
+import com.yangz3720.simplywork.core.workspace.LocalProjectFiles
+import com.yangz3720.simplywork.core.workspace.ProjectFilesOwner
 import com.yangz3720.simplywork.infrastructure.model.ModelProvider
 import com.yangz3720.simplywork.infrastructure.model.config.ModelCapability
 import com.yangz3720.simplywork.infrastructure.model.config.ModelProviderPresets
@@ -19,9 +35,11 @@ import com.yangz3720.simplywork.infrastructure.model.model.TokenUsage
 import com.yangz3720.simplywork.infrastructure.model.model.ToolCall
 import com.yangz3720.simplywork.infrastructure.systemops.SystemOperationRouter
 import io.mockk.mockk
+import java.io.File
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import org.junit.After
@@ -31,7 +49,9 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 import org.junit.rules.TestWatcher
 import org.junit.runner.Description
 
@@ -52,6 +72,9 @@ class AgentViewModelTest {
 
     @get:org.junit.Rule
     val mainRule = MainTestRule()
+
+    @get:Rule
+    val tmp = TemporaryFolder()
 
     // ----- fakes -----
 
@@ -85,6 +108,61 @@ class AgentViewModelTest {
             fetchedAccount = account
             return Result.success(listOf("m1", "m2"))
         }
+    }
+
+    /**
+     * OneDrive 接缝的哑实现：本文件的用例覆盖的是运行驱动/会话/模型选择，不覆盖云同步，
+     * 所以这里只需保证 VM 装配不被打断，并记录 push 是否按项目触发过。
+     */
+    private class FakeOneDrive : OneDriveOwner {
+        override val account = MutableStateFlow<OneDriveAccount?>(null)
+        override val syncState = MutableStateFlow<SyncState>(SyncState.Idle)
+        override val configured = false
+        var pushedFor: String? = null
+        var syncedFor: String? = null
+
+        override suspend fun restore() = Unit
+        override suspend fun connect(activity: Activity): Result<Unit> = Result.success(Unit)
+        override suspend fun disconnect(): Result<Unit> = Result.success(Unit)
+        override suspend fun listFolders(parentId: String, parentPath: String): Result<List<CloudFolder>> =
+            Result.success(emptyList())
+
+        override suspend fun bindFolder(projectId: String, folder: CloudFolder): Result<SyncReport> =
+            Result.failure(UnsupportedOperationException("本用例不覆盖云端绑定"))
+
+        override suspend fun createAndBindFolder(
+            projectId: String,
+            parentId: String,
+            parentPath: String,
+            name: String
+        ): Result<SyncReport> = Result.failure(UnsupportedOperationException("本用例不覆盖云端绑定"))
+
+        override suspend fun unbind(projectId: String): Result<Unit> = Result.success(Unit)
+
+        override suspend fun sync(projectId: String, throttled: Boolean): Result<SyncReport?> {
+            syncedFor = projectId
+            return Result.success(null)
+        }
+
+        override suspend fun pushAfterRun(projectId: String): Result<SyncReport?> {
+            pushedFor = projectId
+            return Result.success(null)
+        }
+    }
+
+    /** self_* 配置缝的哑实现：本文件只借它注册 fs_* 工具，不覆盖配置自改。 */
+    private class FakeSelfConfig : AgentSelfConfig {
+        override fun snapshot() = AgentSelfConfig.Snapshot(
+            activeProviderId = null,
+            activeModel = "",
+            timeoutMs = 60_000L,
+            accounts = emptyList(),
+            projects = emptyList(),
+            currentProjectId = ProjectLogic.DEFAULT_PROJECT_ID
+        )
+
+        override suspend fun apply(mutation: AgentSelfConfig.Mutation) =
+            AgentSelfConfig.ApplyResult(applied = emptyList(), rebuildPending = false, errors = emptyList())
     }
 
     /** 首轮返回 [pre] 各一次；其后等待 [gate]，释放后返回 [final]（仅一次），再挂起。 */
@@ -165,8 +243,23 @@ class AgentViewModelTest {
         router = mockk<SystemOperationRouter>(relaxed = true)
     )
 
-    private fun viewModel(runtime: AgentRuntime): AgentViewModel =
-        AgentViewModel(FakeOwner(runtime), ApprovalCoordinator(), PermissionCoordinator(), fakeProjects())
+    /** 项目文件接缝：真实实现 + 临时目录（不 mock —— 目录遍历与路径安全本来就该一起验）。 */
+    private fun workspace(): AgentWorkspace = AgentWorkspace(File(tmp.root, "ws"))
+
+    private fun files(changes: FileChangeLog = InMemoryFileChangeLog()): ProjectFilesOwner =
+        LocalProjectFiles(workspace(), changes)
+
+    private fun viewModel(
+        runtime: AgentRuntime,
+        projectFiles: ProjectFilesOwner = files()
+    ): AgentViewModel = AgentViewModel(
+        FakeOwner(runtime),
+        ApprovalCoordinator(),
+        PermissionCoordinator(),
+        fakeProjects(),
+        FakeOneDrive(),
+        projectFiles
+    )
 
     /** 真实时间轮询：等待谓词成立或超时。 */
     private fun waitFor(timeoutMs: Long = 8000, predicate: () -> Boolean) {
@@ -286,7 +379,7 @@ class AgentViewModelTest {
     @Test
     fun `selectModel applies selection through owner and updates state`() {
         val owner = FakeOwner(null)
-        val vm = AgentViewModel(owner, ApprovalCoordinator(), PermissionCoordinator(), fakeProjects())
+        val vm = AgentViewModel(owner, ApprovalCoordinator(), PermissionCoordinator(), fakeProjects(), FakeOneDrive(), files())
         Thread.sleep(100) // init 完成后状态稳定
 
         vm.selectModel("deepseek", "  deepseek-chat  ")
@@ -299,7 +392,7 @@ class AgentViewModelTest {
     @Test
     fun `selectModel is rejected while running`() {
         val owner = FakeOwner(buildRuntime(HangingProvider()))
-        val vm = AgentViewModel(owner, ApprovalCoordinator(), PermissionCoordinator(), fakeProjects())
+        val vm = AgentViewModel(owner, ApprovalCoordinator(), PermissionCoordinator(), fakeProjects(), FakeOneDrive(), files())
 
         vm.send("hi")
         waitFor { vm.uiState.value.running }
@@ -313,7 +406,7 @@ class AgentViewModelTest {
     @Test
     fun `fetchModels delegates to owner with account`() = kotlinx.coroutines.runBlocking {
         val owner = FakeOwner(null)
-        val vm = AgentViewModel(owner, ApprovalCoordinator(), PermissionCoordinator(), fakeProjects())
+        val vm = AgentViewModel(owner, ApprovalCoordinator(), PermissionCoordinator(), fakeProjects(), FakeOneDrive(), files())
         val account = ProviderAccount(id = "openrouter", name = "OpenRouter", baseUrl = "https://openrouter.ai/api/v1")
 
         val result = vm.fetchModels(account)
@@ -369,5 +462,136 @@ class AgentViewModelTest {
         assertEquals("first answer", state.messages.last().text)
         assertEquals(0, state.messages.first { it.kind == UiMessageKind.User }.branchIndex)
         assertTrue(!state.running)
+    }
+
+    // ----- 项目文件与改动卡片（v1.5） -----
+
+    /** 内容进 JSON 字符串：换行必须转义，否则 argumentsJson 根本解析不了。 */
+    private fun jsonString(text: String): String =
+        "\"" + text.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n") + "\""
+
+    private fun fsWriteCall(id: String, path: String, content: String) = ToolCall(
+        id = id,
+        name = "fs_write",
+        argumentsJson = """{"path":"$path","content":${jsonString(content)}}"""
+    )
+
+    @Test
+    fun `agent fs_write lands a diff card and the new files card`() {
+        val ws = workspace()
+        val log = InMemoryFileChangeLog()
+        val projects = fakeProjects()
+        val runtime = AgentRuntime.createWithStores(
+            structureStore = InMemorySessionStore(),
+            payloadStore = InMemoryPayloadStore(),
+            provider = ScriptedProvider(
+                response("", toolCalls = listOf(fsWriteCall("c1", "docs/notes.md", "# 标题\n正文"))),
+                response("写好了")
+            ),
+            router = mockk<SystemOperationRouter>(relaxed = true),
+            selfOps = { repo -> SelfOpsTools.registeredTools(repo, FakeSelfConfig(), ws, projects, log) }
+        )
+        val vm = AgentViewModel(
+            FakeOwner(runtime),
+            ApprovalCoordinator(),
+            PermissionCoordinator(),
+            projects,
+            FakeOneDrive(),
+            LocalProjectFiles(ws, log)
+        )
+
+        vm.send("写一份笔记")
+        waitFor { !vm.uiState.value.running && vm.uiState.value.messages.any { it.fileChange != null } }
+
+        // 工具真的写了文件（卡片是事实的投影，不是并行的另一份真相）
+        assertEquals("# 标题\n正文", ws.read(ProjectLogic.DEFAULT_PROJECT_ID, "docs/notes.md").content)
+
+        val card = vm.uiState.value.messages.first { it.fileChange != null }.fileChange!!
+        assertEquals("docs/notes.md", card.path)
+        assertEquals(FileChangeKind.Created, card.kind)
+        assertEquals("c1", card.toolCallId)
+        assertEquals(2, card.addedLines)
+        assertEquals(0, card.removedLines)
+        assertEquals(listOf('+', '+'), card.diff.map { it.prefix })
+
+        // 底部「新增文件」小卡片
+        assertEquals(listOf("docs/notes.md"), vm.uiState.value.newFiles.map { it.path })
+    }
+
+    @Test
+    fun `new files card drops a file that a later change removed`() {
+        val log = InMemoryFileChangeLog()
+        val vm = viewModel(buildRuntime(ScriptedProvider(response("first"), response("second"))), files(log))
+
+        vm.send("hi")
+        waitFor { !vm.uiState.value.running && vm.uiState.value.messages.size == 2 }
+        val sessionId = vm.uiState.value.currentSessionId!!
+
+        runBlocking {
+            log.record(change(sessionId, "docs/a.md", FileChangeKind.Created, 1))
+            log.record(change(sessionId, "tmp.md", FileChangeKind.Created, 2))
+            log.record(change(sessionId, "tmp.md", FileChangeKind.Deleted, 3))
+        }
+
+        // 再跑一轮：会话投影顺带刷新改动卡片
+        vm.send("again")
+        waitFor { !vm.uiState.value.running && vm.uiState.value.messages.size == 4 }
+
+        assertEquals(listOf("docs/a.md"), vm.uiState.value.newFiles.map { it.path })
+    }
+
+    private fun change(sessionId: String, path: String, kind: FileChangeKind, atMs: Long) = FileChange(
+        sessionId = sessionId,
+        projectId = ProjectLogic.DEFAULT_PROJECT_ID,
+        path = path,
+        kind = kind,
+        atMs = atMs
+    )
+
+    @Test
+    fun `file browser enters directories and walks back up`() {
+        val ws = workspace()
+        ws.write(ProjectLogic.DEFAULT_PROJECT_ID, "docs/notes.md", "# hi")
+        ws.write(ProjectLogic.DEFAULT_PROJECT_ID, "todo.txt", "x")
+        val vm = viewModel(buildRuntime(ScriptedProvider(response("noop"))))
+
+        vm.openProjectFiles()
+        waitFor { !vm.uiState.value.filesBusy && vm.uiState.value.fileEntries.isNotEmpty() }
+        // 目录在前，其余按名字
+        assertEquals(listOf("docs", "todo.txt"), vm.uiState.value.fileEntries.map { it.name })
+        assertTrue(vm.uiState.value.fileEntries.first().isDirectory)
+
+        vm.openFileDir("docs")
+        waitFor { vm.uiState.value.filePath == "docs" && !vm.uiState.value.filesBusy }
+        assertEquals(listOf("notes.md"), vm.uiState.value.fileEntries.map { it.name })
+
+        vm.fileDirUp()
+        waitFor { vm.uiState.value.filePath.isEmpty() && !vm.uiState.value.filesBusy }
+        assertEquals(2, vm.uiState.value.fileEntries.size)
+    }
+
+    @Test
+    fun `preview renders markdown and refuses to render binary`() {
+        val ws = workspace()
+        ws.write(ProjectLogic.DEFAULT_PROJECT_ID, "notes.md", "# 标题")
+        ws.writeBytes(ProjectLogic.DEFAULT_PROJECT_ID, "logo.png", byteArrayOf(0x89.toByte(), 0x50, 0x00, 0x01))
+        val vm = viewModel(buildRuntime(ScriptedProvider(response("noop"))))
+
+        vm.openFilePreview("notes.md")
+        waitFor { vm.uiState.value.filePreview != null }
+        val markdown = vm.uiState.value.filePreview!!
+        assertTrue(markdown.markdown)
+        assertEquals("# 标题", markdown.text)
+        assertNull(markdown.notice)
+
+        vm.openFilePreview("logo.png")
+        waitFor { vm.uiState.value.filePreview?.path == "logo.png" }
+        val binary = vm.uiState.value.filePreview!!
+        assertFalse(binary.markdown)
+        assertNull(binary.text)
+        assertEquals("无法预览此类型", binary.notice)
+
+        vm.closeFilePreview()
+        assertNull(vm.uiState.value.filePreview)
     }
 }

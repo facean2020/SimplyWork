@@ -5,9 +5,15 @@ import com.yangz3720.simplywork.core.session.ProjectLogic
 import com.yangz3720.simplywork.core.session.ProjectStore
 import com.yangz3720.simplywork.core.session.SessionRepository
 import com.yangz3720.simplywork.core.workspace.AgentWorkspace
+import com.yangz3720.simplywork.core.workspace.FileChange
+import com.yangz3720.simplywork.core.workspace.FileChangeKind
+import com.yangz3720.simplywork.core.workspace.FileChangeLog
+import com.yangz3720.simplywork.core.workspace.TextDiff
 import com.yangz3720.simplywork.core.workspace.WorkspaceException
 import com.yangz3720.simplywork.infrastructure.model.model.ToolDefinition
 import com.yangz3720.simplywork.infrastructure.systemops.model.DangerLevel
+import com.yangz3720.simplywork.infrastructure.util.AgentLogger
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -70,6 +76,8 @@ interface AgentSelfConfig {
  */
 object SelfOpsTools {
 
+    private const val TAG = "SelfOpsTools"
+
     // ----- 输入 -----
 
     @Serializable
@@ -114,7 +122,9 @@ object SelfOpsTools {
         repository: SessionRepository,
         config: AgentSelfConfig,
         workspace: AgentWorkspace,
-        projects: ProjectStore
+        projects: ProjectStore,
+        /** v1.5：fs_* 的每笔改动落在这里，对话流据此渲染 diff 卡片。 */
+        changes: FileChangeLog
     ): List<RegisteredTool> = listOf(
         configRead(config),
         configUpdate(config),
@@ -122,10 +132,10 @@ object SelfOpsTools {
         projectCreate(projects, workspace),
         fsList(workspace, projects),
         fsRead(workspace, projects),
-        fsWrite(workspace, projects),
+        fsWrite(workspace, projects, changes),
         fsMkdir(workspace, projects),
-        fsMove(workspace, projects),
-        fsDelete(workspace, projects)
+        fsMove(workspace, projects, changes),
+        fsDelete(workspace, projects, changes)
     )
 
     // ----- self_config_read (SAFE) -----
@@ -412,7 +422,11 @@ object SelfOpsTools {
         }
     )
 
-    private fun fsWrite(workspace: AgentWorkspace, projects: ProjectStore): RegisteredTool = RegisteredTool(
+    private fun fsWrite(
+        workspace: AgentWorkspace,
+        projects: ProjectStore,
+        changes: FileChangeLog
+    ): RegisteredTool = RegisteredTool(
         definition = ToolDefinition(
             name = "fs_write",
             description = "Create or overwrite a text file in a project workspace (parent directories are " +
@@ -428,11 +442,39 @@ object SelfOpsTools {
         ),
         dangerLevel = DangerLevel.SAFE,
         parser = { raw -> Result.success(decode<FsWriteInput>(raw)) },
-        runner = { parsed, _ ->
+        runner = { parsed, context ->
             guarded {
                 val input = parsed as? FsWriteInput ?: throw IllegalArgumentException("fs_write arguments did not parse")
                 val projectId = resolveProjectId(projects, input.projectId)
+                // 写入前的原文：改动卡片要报的是"真实的差异"，不是"新内容"。
+                val existing = workspace.readOrNull(projectId, input.path)
+                val baseline = existing?.takeIf { !it.truncated }?.content
                 val result = workspace.write(projectId, input.path, input.content, input.append)
+                recordQuietly(
+                    changes,
+                    changeOf(
+                        context = context,
+                        projectId = projectId,
+                        path = result.path,
+                        kind = when {
+                            result.created -> FileChangeKind.Created
+                            input.append -> FileChangeKind.Appended
+                            else -> FileChangeKind.Updated
+                        },
+                        diff = when {
+                            // 新建：一侧为空 → 全增，精确。
+                            existing == null -> TextDiff.compute("", input.content)
+                            baseline != null -> TextDiff.compute(
+                                baseline,
+                                if (input.append) baseline + input.content else input.content
+                            )
+                            // 追加但基线被读侧上限截断：算出的增量仍然是对的（就是追加的那些行）。
+                            input.append -> TextDiff.compute("", input.content)
+                            // 整篇覆盖 + 基线不可信 → 不比较，只报路径（不拿新内容冒充新增）。
+                            else -> null
+                        }
+                    )
+                )
                 buildJsonObject {
                     put("path", result.path)
                     put("projectId", projectId)
@@ -471,7 +513,11 @@ object SelfOpsTools {
         }
     )
 
-    private fun fsMove(workspace: AgentWorkspace, projects: ProjectStore): RegisteredTool = RegisteredTool(
+    private fun fsMove(
+        workspace: AgentWorkspace,
+        projects: ProjectStore,
+        changes: FileChangeLog
+    ): RegisteredTool = RegisteredTool(
         definition = ToolDefinition(
             name = "fs_move",
             description = "Rename or move a file/directory inside a project workspace. Refused when the " +
@@ -487,11 +533,23 @@ object SelfOpsTools {
         parser = { raw ->
             runCatching { decode<FsMoveInput>(raw) }
         },
-        runner = { parsed, _ ->
+        runner = { parsed, context ->
             guarded {
                 val input = parsed as? FsMoveInput ?: throw IllegalArgumentException("fs_move arguments did not parse")
                 val projectId = resolveProjectId(projects, input.projectId)
                 val result = workspace.move(projectId, input.from, input.to)
+                // 重命名没有内容差异可比，卡片报"从哪到哪"就是全部事实。
+                recordQuietly(
+                    changes,
+                    changeOf(
+                        context = context,
+                        projectId = projectId,
+                        path = result.from,
+                        kind = FileChangeKind.Moved,
+                        diff = null,
+                        toPath = result.to
+                    )
+                )
                 buildJsonObject {
                     put("from", result.from)
                     put("to", result.to)
@@ -501,7 +559,11 @@ object SelfOpsTools {
         }
     )
 
-    private fun fsDelete(workspace: AgentWorkspace, projects: ProjectStore): RegisteredTool = RegisteredTool(
+    private fun fsDelete(
+        workspace: AgentWorkspace,
+        projects: ProjectStore,
+        changes: FileChangeLog
+    ): RegisteredTool = RegisteredTool(
         definition = ToolDefinition(
             name = "fs_delete",
             description = "Delete a file or directory inside a project workspace. Deleting a non-empty " +
@@ -515,11 +577,23 @@ object SelfOpsTools {
         ),
         dangerLevel = DangerLevel.USER_CONFIRMING,
         parser = { raw -> Result.success(decode<FsDeleteInput>(raw)) },
-        runner = { parsed, _ ->
+        runner = { parsed, context ->
             guarded {
                 val input = parsed as? FsDeleteInput ?: throw IllegalArgumentException("fs_delete arguments did not parse")
                 val projectId = resolveProjectId(projects, input.projectId)
+                // 先取原文：删掉之后就没有地方能回答"删了哪些行"了（目录没有内容可比）。
+                val removed = workspace.readOrNull(projectId, input.path)?.takeIf { !it.truncated }
                 val result = workspace.delete(projectId, input.path, input.recursive)
+                recordQuietly(
+                    changes,
+                    changeOf(
+                        context = context,
+                        projectId = projectId,
+                        path = result.path,
+                        kind = FileChangeKind.Deleted,
+                        diff = removed?.let { TextDiff.compute(it.content, "") }
+                    )
+                )
                 buildJsonObject {
                     put("path", result.path)
                     put("projectId", projectId)
@@ -528,6 +602,45 @@ object SelfOpsTools {
             }
         }
     )
+
+    // ----- 改动记录 -----
+
+    /** 组装一笔改动：可比较时带上差异与行数，不可比较时只报事实（path / kind）。 */
+    private fun changeOf(
+        context: ToolExecutionContext,
+        projectId: String,
+        path: String,
+        kind: FileChangeKind,
+        diff: TextDiff.Result?,
+        toPath: String? = null,
+        atMs: Long = System.currentTimeMillis()
+    ): FileChange = FileChange(
+        toolCallId = context.toolCallId.ifBlank { null },
+        sessionId = context.sessionId,
+        projectId = projectId,
+        path = path,
+        kind = kind,
+        toPath = toPath,
+        addedLines = diff?.addedLines,
+        removedLines = diff?.removedLines,
+        diff = diff?.lines.orEmpty(),
+        omittedLines = diff?.omittedLines ?: 0,
+        atMs = atMs
+    )
+
+    /**
+     * 记改动。**文件已经写成功了**，所以这里绝不能因为"记一笔卡片"失败而把工具结果变成
+     * 错误 —— 那是对文件状态的撒谎（P2 的反面：宁可少一张卡片，不多一条假失败）。
+     */
+    private suspend fun recordQuietly(log: FileChangeLog, change: FileChange) {
+        try {
+            log.record(change)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AgentLogger.w(TAG, e) { "failed to record file change for ${change.path}" }
+        }
+    }
 
     // ----- 辅助 -----
 
@@ -541,8 +654,9 @@ object SelfOpsTools {
     /**
      * runner 统一出口：沙箱拒绝 / 参数越界等运行期异常归一成 JSON 错误对象，
      * 模型能读到原因并自纠（P2/P5 精神：异常不裸抛进循环）。
+     * v1.5 起是 `suspend`：块内要落一笔改动记录（见 [recordQuietly]）。
      */
-    private inline fun guarded(crossinline block: () -> JsonObject): JsonObject = try {
+    private suspend inline fun guarded(crossinline block: suspend () -> JsonObject): JsonObject = try {
         block()
     } catch (e: WorkspaceException) {
         error(e.message ?: "workspace operation failed")

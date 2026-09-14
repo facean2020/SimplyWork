@@ -343,6 +343,12 @@ private fun ToolActivityItem(message: UiMessage, expanded: Boolean, onToggleExpa
                 }
             }
         }
+        // v1.5：这次调用对文件做了什么（Codex 式 diff 卡片）。与"结果"展开项不同层级：
+        // 结果回答"工具说了什么"，卡片回答"文件现在变成什么样"。
+        message.fileChange?.let { change ->
+            Spacer(Modifier.size(6.dp))
+            Column(modifier = Modifier.padding(start = 18.dp)) { ToolChangeCard(change) }
+        }
     }
 }
 

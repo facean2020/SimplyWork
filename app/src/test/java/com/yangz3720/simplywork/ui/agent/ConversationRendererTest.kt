@@ -4,14 +4,18 @@ import com.yangz3720.simplywork.core.agent.NodePayloads
 import com.yangz3720.simplywork.core.session.SessionNode
 import com.yangz3720.simplywork.core.session.SessionNodeStatus
 import com.yangz3720.simplywork.core.session.SessionNodeType
+import com.yangz3720.simplywork.core.workspace.FileChange
+import com.yangz3720.simplywork.core.workspace.FileChangeKind
 import com.yangz3720.simplywork.infrastructure.error.InfrastructureException
 import com.yangz3720.simplywork.infrastructure.model.model.Message
+import com.yangz3720.simplywork.infrastructure.model.model.ToolCall
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -170,5 +174,52 @@ class ConversationRendererTest {
         val messages = render(node("u1", SessionNodeType.UserPrompt) { messagePayload(Message.User("唯一提问")) })
         assertEquals(0, messages[0].branchIndex)
         assertEquals(1, messages[0].branchCount)
+    }
+
+    // ----- 改动卡片（v1.5） -----
+
+    private fun writeNode() = node("a", SessionNodeType.ToolCall) {
+        messagePayload(
+            Message.Assistant(
+                content = null,
+                toolCalls = listOf(ToolCall(id = "c1", name = "fs_write", argumentsJson = """{"path":"a.md"}"""))
+            )
+        )
+    }
+
+    private fun change(toolCallId: String?, path: String) = FileChange(
+        toolCallId = toolCallId,
+        sessionId = "s",
+        projectId = "p",
+        path = path,
+        kind = FileChangeKind.Created,
+        addedLines = 2,
+        removedLines = 0
+    )
+
+    @Test
+    fun `file change attaches to the tool activity with the same call id`() {
+        val call = writeNode()
+        val messages = ConversationRenderer.render(
+            listOf(call.first),
+            changes = listOf(change("c1", "a.md"))
+        ) { call.second }
+
+        assertEquals(1, messages.size)
+        assertEquals("a.md", messages[0].fileChange?.path)
+        assertEquals(FileChangeKind.Created, messages[0].fileChange?.kind)
+        assertEquals(2, messages[0].fileChange?.addedLines)
+    }
+
+    @Test
+    fun `change without a matching call id is not attached to anything`() {
+        val call = writeNode()
+        val messages = ConversationRenderer.render(
+            listOf(call.first),
+            changes = listOf(change("ghost", "a.md"), change(null, "b.md"))
+        ) { call.second }
+
+        assertEquals(1, messages.size)
+        assertNull(messages[0].fileChange)
     }
 }

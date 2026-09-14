@@ -11,6 +11,7 @@ kotlin = "2.1.0"
 kotlinxCoroutines = "1.10.1"
 kotlinxSerialization = "1.8.0"
 ktor = "3.1.0"
+msal = "8.4.2"
 javascriptengine = "1.0.0-beta01"
 turbine = "1.2.0"
 mockk = "1.13.14"
@@ -45,6 +46,10 @@ ktor-client-content-negotiation = { group = "io.ktor", name = "ktor-client-conte
 ktor-serialization-kotlinx-json = { group = "io.ktor", name = "ktor-serialization-kotlinx-json", version.ref = "ktor" }
 ktor-client-logging = { group = "io.ktor", name = "ktor-client-logging", version.ref = "ktor" }
 ktor-client-mock = { group = "io.ktor", name = "ktor-client-mock", version.ref = "ktor" }
+
+# MSAL for Android（个人 OneDrive 的 OAuth 2.0 登录）。OneDrive 没有独立 Kotlin SDK，
+# Graph 调用复用本项目已有的 Ktor 栈，不引入 msgraph-sdk-java（依赖树过重）。
+msal = { group = "com.microsoft.identity.client", name = "msal", version.ref = "msal" }
 
 # AndroidX JavaScriptEngine (QuickJS Sandbox)
 androidx-javascriptengine = { group = "androidx.javascriptengine", name = "javascriptengine", version.ref = "javascriptengine" }

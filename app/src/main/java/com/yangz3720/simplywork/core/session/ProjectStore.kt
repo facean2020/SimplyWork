@@ -10,6 +10,24 @@ import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 
 /**
+ * 项目 → OneDrive 文件夹的绑定（v1.4）。绑定的是**文件夹**（driveItem id），
+ * 不是文件：项目的沙箱目录整棵镜像到该文件夹。
+ *
+ * [deltaLink] 是 Graph 增量游标：有它之后每次同步只拉"此后"的变化，配合
+ * [lastSyncedAt] 构成懒惰同步（不做轮询/后台任务）。它随每次同步推进。
+ */
+@Serializable
+data class OneDriveBinding(
+    /** 云端文件夹的 driveItem id（同步主键，绝不存路径：重命名/移动会换路径）。 */
+    val folderId: String,
+    /** 展示用文件夹名（含父级路径，如 `工作/项目A`）。 */
+    val folderPath: String,
+    val deltaLink: String? = null,
+    val lastSyncedAt: Long = 0L,
+    val boundAt: Long = 0L
+)
+
+/**
  * 「项目」（v1.3，参考 Qwen Studio / GPT 建档语义，用户定调"会话归属项目"）：
  * 一个项目 = 一份档案 = 会话归属单位 + 沙箱工作空间目录
  * （`filesDir/agent_workspace/projects/<projectId>/`，由 [com.yangz3720.simplywork.core.workspace.AgentWorkspace] 管理）。
@@ -17,12 +35,16 @@ import kotlinx.serialization.json.Json
  * 项目数量小（个位数到几十），用 SharedPreferences JSON 整体读写即可；
  * 会话归属在 `sessions.project_id` 列（SqliteSessionStore v2）。旧会话行的
  * `project_id = NULL` 由 [DEFAULT_PROJECT_ID] 语义兜底，不回填。
+ *
+ * [oneDrive] 为 null = 未绑定云端（v1.4）。新增字段带默认值，旧 JSON 直接解码；
+ * 快照/序列化该结构时不泄露令牌——令牌只在 MSAL 自己的缓存里。
  */
 @Serializable
 data class Project(
     val id: String,
     val name: String,
-    val createdAt: Long
+    val createdAt: Long,
+    val oneDrive: OneDriveBinding? = null
 )
 
 /** 纯逻辑（唯一裁决点，JVM 可测）：名字校验、去重、默认项目。 */
@@ -105,6 +127,29 @@ class ProjectStore(private val prefs: SharedPreferences) {
     fun switchTo(id: String): Boolean {
         if (byId(id) == null) return false
         prefs.edit().putString(CURRENT_KEY, id).apply()
+        bump()
+        return true
+    }
+
+    // ----- OneDrive 绑定（v1.4）-----
+
+    fun oneDriveBinding(projectId: String): OneDriveBinding? = byId(projectId)?.oneDrive
+
+    /** 所有已绑定云端的项目 id（同步协调器按此枚举，避免全量扫）。 */
+    fun boundProjectIds(): List<String> = decode().filter { it.oneDrive != null }.map { it.id }
+
+    /**
+     * 绑定的唯一写入口：`transform` 收到当前绑定（可能为 null），返回新绑定，
+     * 返回 null 即解除绑定。绑定/解除/推进 deltaLink/记录同步时间都走这里，
+     * 保证"项目只有一个云端文件夹"这个不变量不被绕开。
+     *
+     * @return false 当 [projectId] 不存在（显式失败，不静默丢弃写操作）。
+     */
+    fun updateOneDrive(projectId: String, transform: (OneDriveBinding?) -> OneDriveBinding?): Boolean {
+        val existing = decode()
+        val project = existing.firstOrNull { it.id == projectId } ?: return false
+        val updated = transform(project.oneDrive)
+        encode(existing.map { if (it.id == projectId) it.copy(oneDrive = updated) else it })
         bump()
         return true
     }

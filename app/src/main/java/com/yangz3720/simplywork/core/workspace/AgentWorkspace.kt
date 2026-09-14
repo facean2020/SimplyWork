@@ -61,9 +61,37 @@ class AgentWorkspace(private val root: File) {
         )
     }
 
+    /**
+     * 读文本、失败即 `null`（v1.5 改动记录的**基线**读取用）：写入前"文件原来是什么"，
+     * 文件不存在是再正常不过的情况，不该抛。超 [maxFileBytes] 的截断由 [FileContent.truncated]
+     * 如实报告，调用方自己决定这份基线可不可信。
+     */
+    fun readOrNull(projectId: String, relativePath: String): FileContent? =
+        runCatching { read(projectId, relativePath) }.getOrNull()
+
     // ----- 变更（SAFE 级：写/建目录自由；移动/删除由工具层升级为 USER_VISIBLE/CONFIRMING）-----
 
     data class WriteResult(val path: String, val bytesWritten: Long, val totalBytes: Long, val created: Boolean)
+
+    /**
+     * 二进制读（v1.4 云端镜像同步用）。与 [read] 共用同一套路径安全校验，但**不施加**
+     * [maxFileBytes] 上限 —— 那个上限保护的是模型上下文预算，不是磁盘。镜像必须字节保真，
+     * 按文本截断或解码会静默损坏文件。
+     */
+    fun readBytes(projectId: String, relativePath: String): ByteArray =
+        resolve(projectId, relativePath, what = "a regular file") { it.isFile }.readBytes()
+
+    /** 二进制写；语义同 [write] 但不做大小上限（理由同 [readBytes]）。 */
+    fun writeBytes(projectId: String, relativePath: String, bytes: ByteArray): WriteResult {
+        val file = resolveForWrite(projectId, relativePath)
+        if (file.isDirectory) {
+            throw WorkspaceException("'$relativePath' is a directory, not a file")
+        }
+        val existed = file.exists()
+        file.parentFile?.mkdirs()
+        file.writeBytes(bytes)
+        return WriteResult(path = relativePath, bytesWritten = bytes.size.toLong(), totalBytes = file.length(), created = !existed)
+    }
 
     /** 写文件；父目录自动创建（mkdir -p 语义），[append] 缺省为覆盖。 */
     fun write(projectId: String, relativePath: String, content: String, append: Boolean = false): WriteResult {

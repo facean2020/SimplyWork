@@ -240,8 +240,9 @@ class AgentLoopCoordinator(
         response: ModelResponse
     ): Boolean {
         var anyDenied = false
-        val context = ToolExecutionContext(sessionId)
         for (call in response.toolCalls) {
+            // 上下文随调用走（v1.5）：工具要按 toolCallId 把改动挂回这一条条目。
+            val context = ToolExecutionContext(sessionId, call.id)
             when (val decision = auditGate.preToolAudit(call)) {
                 is AuditGatePipeline.AuditDecision.Approved -> {
                     emit(AgentStepEvent.ToolStarted(call.name, call.id))

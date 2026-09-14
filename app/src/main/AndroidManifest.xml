@@ -51,6 +51,29 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- OneDrive OAuth 回调（MSAL Android）。MSAL Android 的回调地址是
+             `msauth://<包名>/<URL 编码后的签名哈希>`，不是 `msal<clientId>://auth`
+             （后者是 MSAL.NET 的形式，在 Android 上属 legacy）。
+             host 由 AGP 的 ${applicationId} 占位符给出；path 用**未编码**哈希，由
+             gradle.properties / debug keystore 经 manifestPlaceholders 注入。
+             内置 WebView 流程其实在进程内截获回调、不需要这个 filter，但声明它的
+             代价为零，且能同时支持系统浏览器流程。 -->
+        <activity
+            android:name="com.microsoft.identity.client.BrowserTabActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data
+                    android:host="${applicationId}"
+                    android:path="/${msalSignatureHash}"
+                    android:scheme="msauth" />
+            </intent-filter>
+        </activity>
     </application>
 
 </manifest>

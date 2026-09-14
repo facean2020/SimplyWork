@@ -1,9 +1,14 @@
 package com.yangz3720.simplywork.ui.agent
 
+import com.yangz3720.simplywork.core.cloud.CloudFolder
+import com.yangz3720.simplywork.core.cloud.OneDriveAccount
+import com.yangz3720.simplywork.core.cloud.SyncState
 import com.yangz3720.simplywork.core.session.Project
 import com.yangz3720.simplywork.core.session.ProjectLogic
 import com.yangz3720.simplywork.core.session.SessionRecord
 import com.yangz3720.simplywork.core.session.TodoItem
+import com.yangz3720.simplywork.core.workspace.AgentWorkspace
+import com.yangz3720.simplywork.core.workspace.FileChange
 import com.yangz3720.simplywork.infrastructure.model.config.ProviderAccount
 
 /**
@@ -27,7 +32,13 @@ data class UiMessage(
 
     /** 分支信息（UserPrompt 专用）：同一位置的第 [branchIndex] 个分支 / 共 [branchCount] 个。 */
     val branchIndex: Int = 0,
-    val branchCount: Int = 1
+    val branchCount: Int = 1,
+
+    /**
+     * v1.5：这次工具调用对工作区文件做了什么（fs_write/fs_move/fs_delete）。
+     * 由 [ConversationRenderer] 按 toolCallId 挂上，工具条目下渲染成 diff 卡片。
+     */
+    val fileChange: FileChange? = null
 )
 
 enum class UiMessageKind {
@@ -94,5 +105,45 @@ data class AgentUiState(
     val projects: List<Project> = emptyList(),
     val currentProjectId: String = ProjectLogic.DEFAULT_PROJECT_ID,
 
+    /** OneDrive（v1.4）：账号、配置就绪标志与同步状态。 */
+    val oneDriveAccount: OneDriveAccount? = null,
+    val oneDriveConfigured: Boolean = false,
+    val syncState: SyncState = SyncState.Idle,
+
+    /** 云端文件夹选择器的当前层（层级栈由弹层自己维护，这里只放要渲染的内容）。 */
+    val cloudFolders: List<CloudFolder> = emptyList(),
+    val cloudBusy: Boolean = false,
+    val cloudError: String? = null,
+
+    /** 项目文件管理器（v1.5）：当前层路径、条目、忙碌与错误。 */
+    val filePath: String = "",
+    val fileEntries: List<AgentWorkspace.Entry> = emptyList(),
+    val filesBusy: Boolean = false,
+    val filesError: String? = null,
+
+    /** 文件预览（null = 关闭）。 */
+    val filePreview: FilePreview? = null,
+
+    /**
+     * 当前会话**新建**的文件（底部小卡片）：点一行即跳该文件的预览。
+     * 只含此刻仍存在的文件 —— 后来被删掉/移走的不会留在卡片里。
+     */
+    val newFiles: List<FileChange> = emptyList(),
+
     val modelConfigured: Boolean = true
+)
+
+/**
+ * 文件预览页的内容（v1.5）。
+ *
+ * [text] 为 null 表示**不显示内容**，原因在 [notice]：二进制、读取失败等。
+ * 区分"内容为空"和"没有内容可显示"是刻意的 —— 前者渲染空白页，后者必须给出理由。
+ */
+data class FilePreview(
+    val path: String,
+    val markdown: Boolean = false,
+    val text: String? = null,
+    val notice: String? = null,
+    val truncated: Boolean = false,
+    val sizeBytes: Long = 0L
 )
