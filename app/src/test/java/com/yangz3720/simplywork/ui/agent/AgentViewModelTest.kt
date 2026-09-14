@@ -104,7 +104,7 @@ class AgentViewModelTest {
         override fun removeCustomAccount(accountId: String) { /* no-op */ }
         override fun autoApproveNonDestructive(): Boolean = autoApprove
         override fun setAutoApproveNonDestructive(enabled: Boolean) { autoApprove = enabled }
-        override fun contextBudget(): ContextBudgetPlan =
+        override fun contextBudget(): ContextBudgetPlan? =
             ContextBudget.resolve(contextOverride, providerContextTokens, "test-model")
         override fun setContextBudgetOverride(tokens: Int?) { contextOverride = tokens }
         override fun applySelection(providerId: String, model: String) {

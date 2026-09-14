@@ -68,8 +68,8 @@ interface AgentRuntimeOwner {
     /** 设置页（v1.1）：切换自动批准（会重建运行时，使门禁拿到新策略）。 */
     fun setAutoApproveNonDestructive(enabled: Boolean)
 
-    /** 设置页（v1.1）：当前模型的上下文预算（含它从哪来，设置页要如实展示）。 */
-    fun contextBudget(): ContextBudgetPlan
+    /** 设置页（v1.1）：当前模型的上下文预算（含它从哪来，设置页要如实展示）。未选模型时 null。 */
+    fun contextBudget(): ContextBudgetPlan?
 
     /** 设置页（v1.1）：手动指定上下文预算；null = 回到自动推导。 */
     fun setContextBudgetOverride(tokens: Int?)

@@ -217,7 +217,12 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
         rebuildRuntime()
     }
 
-    override fun contextBudget(): ContextBudgetPlan = contextBudgetPlan()
+    /**
+     * 没有选中模型时返回 null，而不是一个"默认 24k"的预算：那时并没有任何请求要发，
+     * 报一个数字会让人以为这个预算是真的在生效（设置页的"未选择模型"分支正为此存在）。
+     */
+    override fun contextBudget(): ContextBudgetPlan? =
+        if (keyring.state.activeModel.isBlank()) null else contextBudgetPlan()
 
     override fun setContextBudgetOverride(tokens: Int?) {
         mutateKeyring { KeyringLogic.withContextBudgetOverride(it, tokens) }
