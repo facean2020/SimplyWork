@@ -76,4 +76,55 @@ class ProjectLogicTest {
         )
         assertEquals(listOf(Project("a", "A", 5L)), json.decodeFromString(ListSerializer(Project.serializer()), encoded))
     }
+
+    // ----- 删除项目（v1.6） -----
+
+    @Test
+    fun `delete removes the project and falls a stale current pointer back to default`() {
+        val store = ProjectStore(InMemoryPrefs())
+        val created = store.create("项目1").getOrThrow()
+        assertTrue(store.switchTo(created.id))
+
+        assertTrue(store.delete(created.id).isSuccess)
+
+        assertTrue(store.byId(created.id) == null)
+        assertFalse(store.list().any { it.id == created.id })
+        // 删的正是当前项目：指针必须回落默认，不能悬空（见 currentId）
+        assertEquals(ProjectLogic.DEFAULT_PROJECT_ID, store.currentId())
+    }
+
+    @Test
+    fun `delete keeps the pointer when another project is current`() {
+        val store = ProjectStore(InMemoryPrefs())
+        val a = store.create("A").getOrThrow()
+        val b = store.create("B").getOrThrow()
+        assertTrue(store.switchTo(b.id))
+
+        assertTrue(store.delete(a.id).isSuccess)
+
+        assertEquals(b.id, store.currentId())
+        assertTrue(store.byId(b.id) != null)
+    }
+
+    @Test
+    fun `delete refuses the default project and unknown ids`() {
+        val store = ProjectStore(InMemoryPrefs())
+
+        assertTrue(store.delete(ProjectLogic.DEFAULT_PROJECT_ID).isFailure)
+        assertTrue(store.delete("ghost").isFailure)
+        // 拒绝不能是"删了再说"：默认项目必须还在
+        assertTrue(store.byId(ProjectLogic.DEFAULT_PROJECT_ID) != null)
+        assertEquals(ProjectLogic.DEFAULT_PROJECT_ID, store.currentId())
+    }
+
+    @Test
+    fun `deleted project stays deleted across store instances`() {
+        val prefs = InMemoryPrefs()
+        val created = ProjectStore(prefs).create("临时").getOrThrow()
+
+        ProjectStore(prefs).delete(created.id).getOrThrow()
+
+        // 换一个实例（= 重启后）读同一份 prefs：删掉的不能复活
+        assertFalse(ProjectStore(prefs).list().any { it.id == created.id })
+    }
 }

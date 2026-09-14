@@ -3,6 +3,7 @@ package com.yangz3720.simplywork.core.workspace
 import java.io.File
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -87,5 +88,19 @@ class JsonFileChangeLogTest {
         assertThrows(IllegalArgumentException::class.java) {
             runBlocking { log.record(change("../../escape", "a.md", 1)) }
         }
+    }
+
+    @Test
+    fun `delete drops only the target session file`() = runBlocking {
+        val dir = tmp.newFolder()
+        val log = JsonFileChangeLog(dir)
+        log.record(change("s1", "a.md", 1))
+        log.record(change("s2", "b.md", 2))
+
+        log.delete("s1")
+
+        assertFalse(File(dir, "s1.json").exists())
+        assertTrue(log.changes("s1").isEmpty())
+        assertEquals(listOf("b.md"), log.changes("s2").map { it.path })
     }
 }

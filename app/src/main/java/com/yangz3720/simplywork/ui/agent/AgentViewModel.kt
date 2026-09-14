@@ -39,7 +39,6 @@ interface AgentRuntimeOwner {
     fun current(): AgentRuntime?
     fun accounts(): List<ProviderAccount>
     fun selection(): ModelSelection?
-    fun timeoutMs(): Long
 
     /**
      * 配置版本（v1.3）：agent 经 self_config_update 自改配置时自增。VM 据此在空闲时
@@ -58,9 +57,6 @@ interface AgentRuntimeOwner {
 
     /** 设置页：删除自定义端点（预设不可删，调用方保证）。 */
     fun removeCustomAccount(accountId: String)
-
-    /** 设置页：全局请求超时（毫秒）。 */
-    fun setTimeout(ms: Long)
 
     /** 对话屏顶栏：切换当前服务商 + 模型并重建运行时（调用方保证当前无运行中的 run）。 */
     fun applySelection(providerId: String, model: String)
@@ -209,6 +205,65 @@ class AgentViewModel(
                 onSuccess = { refreshProjectsAndSessions() },
                 onFailure = { e -> _uiState.update { it.copy(runError = e.message ?: "新建项目失败") } }
             )
+        }
+    }
+
+    /**
+     * 删除项目（**不可撤销**，UI 侧必须先弹窗确认）：项目名下的一切都清掉 ——
+     * 全部会话（消息 + payload + 改动记录）、沙箱目录、云端同步基线，最后才是项目条目。
+     *
+     * 云端**文件保留**：解绑只丢基线，绝不因为删本地项目去动用户的网盘。
+     * 顺序刻意是"先清子数据、后删条目"：中途失败时项目还在，可以重来一次；
+     * 反过来先删条目就会留下一堆再也认不回来的孤儿数据。
+     */
+    fun deleteProject(projectId: String) {
+        if (_uiState.value.running) {
+            _uiState.update { it.copy(runError = "正在运行中，请先停止当前任务再删除项目") }
+            return
+        }
+        // 默认项目先挡在这里：注册表最后一步才会拒绝它，等走到那儿会话与沙箱已经被清空了。
+        if (projectId == ProjectLogic.DEFAULT_PROJECT_ID) {
+            _uiState.update { it.copy(runError = "默认项目不可删除") }
+            return
+        }
+        val wasCurrent = _uiState.value.currentProjectId == projectId
+        viewModelScope.launch(ioDispatcher) {
+            val repository = repository()
+            repository?.listSessions().orEmpty()
+                .filter { (it.projectId ?: ProjectLogic.DEFAULT_PROJECT_ID) == projectId }
+                .forEach { session ->
+                    repository?.deleteSession(session.id)
+                    projectFiles.deleteSession(session.id)
+                }
+            oneDrive.unbind(projectId)
+            projectFiles.deleteProject(projectId)
+            projectStore.delete(projectId).fold(
+                onSuccess = {
+                    // 删的是当前项目 → 会话投影必须跟着回落，否则对话还停在已删项目的会话上。
+                    if (wasCurrent) startNewChat()
+                    // projectStore.delete 已 bump changes → refreshProjectsAndSessions。
+                },
+                onFailure = { e -> _uiState.update { it.copy(runError = e.message ?: "删除项目失败") } }
+            )
+        }
+    }
+
+    // ----- 会话删除 -----
+
+    /**
+     * 删除单个会话（**不可撤销**）：节点、State Memory、payload 文件与改动记录一并清除。
+     * 删的若是当前会话则回到"新对话"空态。
+     */
+    fun deleteSession(sessionId: String) {
+        if (_uiState.value.running) {
+            _uiState.update { it.copy(runError = "正在运行中，请先停止当前任务再删除会话") }
+            return
+        }
+        viewModelScope.launch(ioDispatcher) {
+            repository()?.deleteSession(sessionId)
+            projectFiles.deleteSession(sessionId)
+            if (_uiState.value.currentSessionId == sessionId) startNewChat()
+            refreshProjectsAndSessions()
         }
     }
 
@@ -536,14 +591,6 @@ class AgentViewModel(
             )
         }
     }
-
-    /** 设置页：全局请求超时。 */
-    fun saveTimeoutMs(ms: Long) {
-        owner.setTimeout(ms)
-    }
-
-    /** 设置页展示当前全局超时。 */
-    fun timeoutMs(): Long = owner.timeoutMs()
 
     /** 对话屏/设置页：拉取某服务商的模型列表（GET /models）。 */
     suspend fun fetchModels(account: ProviderAccount): Result<List<String>> = owner.fetchModels(account)

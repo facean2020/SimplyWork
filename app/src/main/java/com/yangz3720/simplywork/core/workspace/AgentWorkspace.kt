@@ -29,6 +29,20 @@ class AgentWorkspace(private val root: File) {
         return File(root, projectId).apply { mkdirs() }
     }
 
+    /**
+     * 删除整个项目目录（项目被删除时，UI 走这条清空沙箱）。
+     *
+     * 刻意不走 [projectDir]：那个方法会先 `mkdirs()`，等于为了删一个不存在的目录
+     * 先把它建出来。
+     *
+     * @return 调用之后目录是否确实不在了 —— 本就不存在也是 true（"删完了"的语义，
+     * 不做"到底删没删"的区分：调用方只关心它现在不在）。
+     */
+    fun deleteProject(projectId: String): Boolean {
+        require(ProjectIdRegex.matches(projectId)) { "invalid project id: '$projectId'" }
+        return File(root, projectId).deleteRecursively()
+    }
+
     // ----- 查询 -----
 
     data class Entry(val name: String, val isDirectory: Boolean, val sizeBytes: Long, val modifiedAtMs: Long)

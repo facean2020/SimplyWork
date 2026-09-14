@@ -1,8 +1,10 @@
 package com.yangz3720.simplywork.ui.agent
 
 import androidx.activity.compose.LocalActivity
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -179,6 +181,7 @@ fun AgentScreen(
                         viewModel.openSession(id)
                         scope.launch { drawerState.close() }
                     },
+                    onDelete = { session -> viewModel.deleteSession(session.id) },
                     onRefresh = { viewModel.refreshSessions() }
                 )
             }
@@ -188,17 +191,20 @@ fun AgentScreen(
             topBar = {
                 TopAppBar(
                     // Gemini/ChatGPT 式模型选择 chip：上行会话名，下行当前服务商·模型（点按弹层切换）。
+                    // 会话名只在会话已落库时才有，新对话不占那一行（原先这里顶着一个 App 名占位）。
                     title = {
                         Column(
                             modifier = Modifier.clickable { showModelPicker = true }
                         ) {
-                            Text(
-                                text = state.currentTitle ?: "SimplyWork",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
+                            state.currentTitle?.takeIf { it.isNotBlank() }?.let { title ->
+                                Text(
+                                    text = title,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
                                     text = modelLabel,
@@ -325,6 +331,7 @@ fun AgentScreen(
                 showProjects = false
                 oneDriveTarget = project
             },
+            onDelete = { project -> viewModel.deleteProject(project.id) },
             onDismiss = { showProjects = false }
         )
     }
@@ -357,14 +364,17 @@ fun AgentScreen(
 
 // ----- 会话抽屉（ChatGPT 式列表） -----
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SessionDrawer(
     sessions: List<SessionRecord>,
     currentSessionId: String?,
     onNewChat: () -> Unit,
     onOpen: (String) -> Unit,
+    onDelete: (SessionRecord) -> Unit,
     onRefresh: () -> Unit
 ) {
+    var pendingDelete by remember { mutableStateOf<SessionRecord?>(null) }
     LaunchedEffect(Unit) { onRefresh() }
     Column(modifier = Modifier.padding(vertical = 12.dp)) {
         Row(
@@ -410,7 +420,12 @@ private fun SessionDrawer(
                                 if (selected) MaterialTheme.colorScheme.primaryContainer
                                 else androidx.compose.ui.graphics.Color.Transparent
                             )
-                            .clickable { onOpen(session.id) }
+                            .combinedClickable(
+                                onClickLabel = "打开对话",
+                                onLongClickLabel = "删除对话",
+                                onClick = { onOpen(session.id) },
+                                onLongClick = { pendingDelete = session }
+                            )
                             .padding(horizontal = 20.dp, vertical = 14.dp)
                     ) {
                         Text(
@@ -430,5 +445,18 @@ private fun SessionDrawer(
                 }
             }
         }
+    }
+
+    pendingDelete?.let { target ->
+        ConfirmDeleteDialog(
+            title = "删除对话",
+            body = "将删除「${target.title}」的全部消息与文件改动记录，此操作不可撤销。" +
+                "项目里的文件不受影响。",
+            onConfirm = {
+                onDelete(target)
+                pendingDelete = null
+            },
+            onDismiss = { pendingDelete = null }
+        )
     }
 }
