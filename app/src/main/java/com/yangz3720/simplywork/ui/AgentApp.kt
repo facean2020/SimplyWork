@@ -88,12 +88,10 @@ private fun SettingsScreenRoute(viewModel: AgentViewModel, onBack: () -> Unit) {
     val state by viewModel.uiState.collectAsState()
     SettingsScreen(
         accounts = state.providerAccounts,
-        timeoutMs = viewModel.timeoutMs(),
         onBack = onBack,
         onSaveKey = { id, key -> viewModel.saveAccountKey(id, key) },
         onAddCustom = { name, url, key -> viewModel.addCustomAccount(name, url, key) },
-        onRemoveCustom = { id -> viewModel.removeCustomAccount(id) },
-        onSaveTimeout = { ms -> viewModel.saveTimeoutMs(ms) }
+        onRemoveCustom = { id -> viewModel.removeCustomAccount(id) }
     )
 }
 

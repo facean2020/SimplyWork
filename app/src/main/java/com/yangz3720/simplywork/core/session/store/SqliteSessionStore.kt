@@ -145,6 +145,20 @@ class SqliteSessionStore(context: Context, databaseName: String = "agent_session
             if (cursor.moveToFirst()) cursor.getString(0) else null
         }
 
+    override fun deleteSession(sessionId: String) {
+        val db = writableDatabase
+        // 三张表必须一起消失：留一行悬空 node 会让"会话已删"变成半个事实。
+        db.beginTransaction()
+        try {
+            db.execSQL("DELETE FROM nodes WHERE session_id = ?", arrayOf(sessionId))
+            db.execSQL("DELETE FROM session_state WHERE session_id = ?", arrayOf(sessionId))
+            db.execSQL("DELETE FROM sessions WHERE id = ?", arrayOf(sessionId))
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     companion object {
         private const val DB_VERSION = 2
 

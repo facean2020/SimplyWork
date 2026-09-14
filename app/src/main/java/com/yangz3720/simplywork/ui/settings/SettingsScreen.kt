@@ -16,8 +16,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material3.Button
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -46,17 +44,14 @@ import com.yangz3720.simplywork.infrastructure.model.config.ProviderAccount
 @Composable
 fun SettingsScreen(
     accounts: List<ProviderAccount>,
-    timeoutMs: Long,
     onBack: () -> Unit,
     onSaveKey: (accountId: String, apiKey: String) -> Unit,
     onAddCustom: (name: String, baseUrl: String, apiKey: String) -> Unit,
-    onRemoveCustom: (accountId: String) -> Unit,
-    onSaveTimeout: (ms: Long) -> Unit
+    onRemoveCustom: (accountId: String) -> Unit
 ) {
     BackHandler { onBack() }
 
     var showAddCustom by remember { mutableStateOf(false) }
-    var timeoutText by remember(timeoutMs) { mutableStateOf(timeoutMs.toString()) }
 
     Scaffold(
         topBar = {
@@ -118,28 +113,6 @@ fun SettingsScreen(
                 }
             }
 
-            Spacer(Modifier.size(16.dp))
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
-            Spacer(Modifier.size(14.dp))
-            Text(
-                text = "高级",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onBackground
-            )
-            Spacer(Modifier.size(6.dp))
-            OutlinedTextField(
-                value = timeoutText,
-                onValueChange = { timeoutText = it },
-                label = { Text("请求超时（毫秒）", style = MaterialTheme.typography.labelMedium) },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
-            TextButton(
-                onClick = { timeoutText.toLongOrNull()?.let(onSaveTimeout) },
-                enabled = (timeoutText.toLongOrNull() ?: 0L) >= 1_000L
-            ) {
-                Text("保存超时设置")
-            }
             Spacer(Modifier.size(24.dp))
         }
     }

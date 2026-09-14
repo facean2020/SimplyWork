@@ -1,6 +1,7 @@
 package com.yangz3720.simplywork.ui.agent
 
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -31,6 +32,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.yangz3720.simplywork.core.session.Project
+import com.yangz3720.simplywork.core.session.ProjectLogic
 
 /**
  * 项目切换/新建弹层（v1.3，参考 Qwen Studio 建档）：列项目（当前项打勾）、
@@ -38,8 +40,11 @@ import com.yangz3720.simplywork.core.session.Project
  *
  * v1.4：每行右侧多一个云端入口（[onOpenOneDrive]），文案随绑定状态变化 ——
  * 用文字而不是新增图标，避免为了一个状态再引一套图标依赖。
+ *
+ * v1.6：长按行 → 确认后删除项目（[onDelete]）。默认项目只弹告知、不给删除按钮
+ * （它是历史会话的兜底归属，见 [ProjectLogic.DEFAULT_PROJECT_ID]）。
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun ProjectSheet(
     projects: List<Project>,
@@ -47,9 +52,11 @@ fun ProjectSheet(
     onSelect: (String) -> Unit,
     onCreate: (String) -> Unit,
     onOpenOneDrive: (Project) -> Unit,
+    onDelete: (Project) -> Unit,
     onDismiss: () -> Unit
 ) {
     var draft by remember { mutableStateOf("") }
+    var pendingDelete by remember { mutableStateOf<Project?>(null) }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -57,7 +64,7 @@ fun ProjectSheet(
         Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {
             Text("项目", style = MaterialTheme.typography.titleMedium)
             Text(
-                "各项目的会话与文件相互独立",
+                "各项目的会话与文件相互独立；长按可删除项目",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
@@ -68,7 +75,12 @@ fun ProjectSheet(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { onSelect(project.id) }
+                            .combinedClickable(
+                                onClickLabel = "切换到该项目",
+                                onLongClickLabel = "删除项目",
+                                onClick = { onSelect(project.id) },
+                                onLongClick = { pendingDelete = project }
+                            )
                             .padding(vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -130,5 +142,25 @@ fun ProjectSheet(
                 }
             }
         }
+    }
+
+    pendingDelete?.let { target ->
+        val deletable = target.id != ProjectLogic.DEFAULT_PROJECT_ID
+        ConfirmDeleteDialog(
+            title = if (deletable) "删除项目" else "无法删除默认项目",
+            body = if (deletable) {
+                "将删除「${target.name}」及其全部会话、本地文件与云端关联记录；" +
+                    "云端文件夹里的文件会保留。此操作不可撤销。"
+            } else {
+                "「${target.name}」是历史会话的兜底归属，删掉它那些会话就无处可去了。"
+            },
+            onConfirm = if (deletable) {
+                {
+                    onDelete(target)
+                    pendingDelete = null
+                }
+            } else null,
+            onDismiss = { pendingDelete = null }
+        )
     }
 }

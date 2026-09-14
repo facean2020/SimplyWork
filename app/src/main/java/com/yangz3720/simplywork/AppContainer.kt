@@ -180,8 +180,6 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
         return ModelSelection(providerId = id, model = state.activeModel)
     }
 
-    override fun timeoutMs(): Long = keyring.state.timeoutMs
-
     override fun saveAccountKey(accountId: String, apiKey: String) {
         mutateKeyring { KeyringLogic.withKey(it, accountId, apiKey) }
         rebuildIfActive(accountId)
@@ -200,11 +198,6 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
 
     override fun removeCustomAccount(accountId: String) {
         mutateKeyring { KeyringLogic.removeAccount(it, accountId) }
-        rebuildRuntime()
-    }
-
-    override fun setTimeout(ms: Long) {
-        mutateKeyring { KeyringLogic.withTimeout(it, ms) }
         rebuildRuntime()
     }
 

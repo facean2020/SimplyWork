@@ -194,4 +194,37 @@ class SessionRepositoryTest {
         val session = repository.createSession("s")
         assertTrue(repository.promptSiblings(session.id, "ghost").isEmpty())
     }
+
+    // ----- 删除会话 -----
+
+    @Test
+    fun `deleteSession removes nodes, state and payload`() = runTest {
+        val session = repository.createSession("bye")
+        val node = append(session.id, null, SessionNodeType.UserPrompt, "hi")
+        repository.saveState(session.id, StateMemory(todos = listOf(TodoItem("t1", "x", TodoStatus.done, 1L, 1L))))
+
+        repository.deleteSession(session.id)
+
+        assertNull(repository.getSession(session.id))
+        assertTrue(repository.listNodes(session.id).isEmpty())
+        assertTrue(repository.activePath(session.id).isEmpty())
+        assertTrue(repository.loadState(session.id).todos.isEmpty())
+        // payload 也必须没了：读它要显式失败，而不是悄悄返回旧内容
+        assertThrows(InfrastructureException.Session.PayloadMissing::class.java) { repository.payload(node) }
+    }
+
+    @Test
+    fun `deleteSession leaves other sessions untouched`() = runTest {
+        val keep = repository.createSession("keep")
+        val gone = repository.createSession("gone")
+        append(keep.id, null, SessionNodeType.UserPrompt, "k")
+        append(gone.id, null, SessionNodeType.UserPrompt, "g")
+
+        repository.deleteSession(gone.id)
+
+        assertNull(repository.getSession(gone.id))
+        assertTrue(repository.listNodes(gone.id).isEmpty())
+        assertEquals(1, repository.listNodes(keep.id).size)
+        assertTrue(repository.activePath(keep.id).single().nodeType == SessionNodeType.UserPrompt)
+    }
 }

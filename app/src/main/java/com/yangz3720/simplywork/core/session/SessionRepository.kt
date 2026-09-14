@@ -83,6 +83,12 @@ interface SessionRepository {
      * ToolResult ("interrupted by restart") so message pairing stays valid.
      */
     suspend fun cleanupInterrupted(sessionId: String)
+
+    /**
+     * Deletes the session and everything that belongs to it: nodes, State Memory and the
+     * payload file. Irreversible — callers get user confirmation first.
+     */
+    suspend fun deleteSession(sessionId: String)
 }
 
 class SessionRepositoryImpl(
@@ -279,6 +285,15 @@ class SessionRepositoryImpl(
             tokenCount = 32,
             status = SessionNodeStatus.success
         )
+    }
+
+    override suspend fun deleteSession(sessionId: String) {
+        // 结构先删、payload 后删：反过来的话中途被杀会剩下一行指向不存在 payload 的
+        // node（读它就抛 PayloadMissing），而先删结构最多留一个读不到的死文件。
+        mutex.withLock {
+            structureStore.deleteSession(sessionId)
+            payloadStore.delete(sessionId)
+        }
     }
 
     private companion object {

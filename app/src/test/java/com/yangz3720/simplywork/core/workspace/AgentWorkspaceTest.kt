@@ -112,4 +112,34 @@ class AgentWorkspaceTest {
         assertEquals("B", ws.read("projB", "file.txt").content)
         assertEquals(1, ws.list("projA").entries.size)
     }
+
+    @Test
+    fun `deleteProject removes the whole project tree and leaves siblings alone`() {
+        val ws = workspace()
+        ws.write("p1", "docs/notes.md", "hi")
+        ws.write("p2", "keep.txt", "keep")
+
+        assertTrue(ws.deleteProject("p1"))
+
+        assertFalse(File(tmp.root, "p1").exists())
+        assertTrue(File(tmp.root, "p2/keep.txt").exists())
+    }
+
+    @Test
+    fun `deleteProject on a missing project reports done and never re-creates it`() {
+        val ws = workspace()
+
+        // deleteRecursively 对"本就不存在"返回 true，与"删完之后它不在了"同义
+        assertTrue(ws.deleteProject("never-used"))
+
+        // 删一个不存在的目录不能顺手 mkdirs 出来（projectDir 会创建，这里刻意不走它）
+        assertFalse(File(tmp.root, "never-used").exists())
+    }
+
+    @Test
+    fun `deleteProject refuses a traversing project id`() {
+        val ws = workspace()
+        assertThrows(IllegalArgumentException::class.java) { ws.deleteProject("../evil") }
+        assertFalse(File(tmp.root.parentFile, "evil").exists())
+    }
 }

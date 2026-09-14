@@ -57,6 +57,12 @@ class InMemorySessionStore : SessionStore {
     }
 
     override fun loadState(sessionId: String): String? = states[sessionId]
+
+    override fun deleteSession(sessionId: String) {
+        sessions.remove(sessionId)
+        nodeOrder.remove(sessionId)?.forEach { nodes.remove(it) }
+        states.remove(sessionId)
+    }
 }
 
 /** In-memory [PayloadStore] mirroring [JsonlPayloadStore] semantics. */
@@ -64,10 +70,21 @@ class InMemoryPayloadStore : PayloadStore {
 
     private val payloads = ConcurrentHashMap<String, String>()
 
+    /** nodeId -> sessionId，只为 [delete] 能整会话清干净（[payloads] 只按 nodeId 索引）。 */
+    private val sessionOf = ConcurrentHashMap<String, String>()
+
     override fun append(sessionId: String, nodeId: String, nodeType: String, payloadJson: String): PayloadLocation {
         payloads[nodeId] = payloadJson
+        sessionOf[nodeId] = sessionId
         return PayloadLocation(offset = -1L, length = payloadJson.length)
     }
 
     override fun read(sessionId: String, nodeId: String): String? = payloads[nodeId]
+
+    override fun delete(sessionId: String) {
+        sessionOf.entries.filter { it.value == sessionId }.forEach { entry ->
+            sessionOf.remove(entry.key)
+            payloads.remove(entry.key)
+        }
+    }
 }

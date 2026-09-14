@@ -131,6 +131,33 @@ class ProjectStore(private val prefs: SharedPreferences) {
         return true
     }
 
+    /**
+     * 删除项目：这里只动注册表。该项目名下的会话、沙箱目录、改动记录与云端基线由 UI
+     * 层按顺序清掉（[com.yangz3720.simplywork.ui.agent.AgentViewModel.deleteProject]）——
+     * 注册表不认识会话库与工作区，把那些也塞进来会让这一层变胖且无法单测。
+     *
+     * 默认项目不可删：它是全部 pre-v1.3 会话的兜底归属（见 [currentId]），删掉会让
+     * 那些会话无处可去。
+     *
+     * @return failure 当 [id] 是默认项目或不存在（显式失败，不静默丢弃，P2）。
+     */
+    fun delete(id: String): Result<Unit> {
+        if (id == ProjectLogic.DEFAULT_PROJECT_ID) {
+            return Result.failure(IllegalArgumentException("默认项目不可删除"))
+        }
+        val existing = decode()
+        if (existing.none { it.id == id }) {
+            return Result.failure(IllegalArgumentException("未知项目：$id"))
+        }
+        encode(existing.filterNot { it.id == id })
+        // 当前指针指向被删项目 → 回落默认，绝不留悬空指针（与 [currentId] 同一条规则）。
+        if (prefs.getString(CURRENT_KEY, null) == id) {
+            prefs.edit().putString(CURRENT_KEY, ProjectLogic.DEFAULT_PROJECT_ID).apply()
+        }
+        bump()
+        return Result.success(Unit)
+    }
+
     // ----- OneDrive 绑定（v1.4）-----
 
     fun oneDriveBinding(projectId: String): OneDriveBinding? = byId(projectId)?.oneDrive

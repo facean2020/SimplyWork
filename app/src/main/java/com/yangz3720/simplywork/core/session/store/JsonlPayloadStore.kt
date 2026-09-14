@@ -108,6 +108,12 @@ class JsonlPayloadStore(private val baseDir: File) : PayloadStore {
         return payloads
     }
 
+    override fun delete(sessionId: String) {
+        // 索引一起丢：留着旧索引会让"删完再建同名会话"读到已删文件的偏移量。
+        indexes.remove(sessionId)
+        fileFor(sessionId).delete()
+    }
+
     // ----- internals -----
 
     private fun fileFor(sessionId: String): File = File(baseDir, "$sessionId.jsonl")

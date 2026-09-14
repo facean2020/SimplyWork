@@ -83,7 +83,6 @@ class AgentViewModelTest {
     private class FakeOwner(var runtime: AgentRuntime?) : AgentRuntimeOwner {
         val accounts = ModelProviderPresets.ALL.toMutableList()
         var selection: ModelSelection? = null
-        var currentTimeout: Long = 60_000L
         var savedKey: Pair<String, String>? = null
         var appliedSelection: ModelSelection? = null
         var fetchedAccount: ProviderAccount? = null
@@ -93,13 +92,11 @@ class AgentViewModelTest {
         override fun current(): AgentRuntime? = runtime
         override fun accounts(): List<ProviderAccount> = accounts
         override fun selection(): ModelSelection? = selection
-        override fun timeoutMs(): Long = currentTimeout
         override fun rebuildRuntimeIfNeeded() { rebuilds += 1 }
         override fun saveAccountKey(accountId: String, apiKey: String) { savedKey = accountId to apiKey }
         override fun upsertCustomAccount(name: String, baseUrl: String, apiKey: String) =
             ProviderAccount(id = "custom-x", name = name, baseUrl = baseUrl, apiKey = apiKey)
         override fun removeCustomAccount(accountId: String) { /* no-op */ }
-        override fun setTimeout(ms: Long) { currentTimeout = ms }
         override fun applySelection(providerId: String, model: String) {
             appliedSelection = ModelSelection(providerId, model)
             selection = appliedSelection
@@ -593,5 +590,99 @@ class AgentViewModelTest {
 
         vm.closeFilePreview()
         assertNull(vm.uiState.value.filePreview)
+    }
+
+    // ----- 删除会话 / 删除项目（不可撤销，必须删干净） -----
+
+    @Test
+    fun `deleteSession clears the projection and the stored session`() {
+        val runtime = buildRuntime(ScriptedProvider(response("all done")))
+        val vm = viewModel(runtime)
+
+        vm.send("你好")
+        waitFor { !vm.uiState.value.running && vm.uiState.value.messages.size == 2 }
+        val sessionId = vm.uiState.value.currentSessionId!!
+
+        vm.deleteSession(sessionId)
+
+        waitFor { vm.uiState.value.sessions.isEmpty() }
+        // 删的是当前会话 → 回到"新对话"空态，而不是停在一个已经不存在的会话上
+        assertNull(vm.uiState.value.currentSessionId)
+        assertTrue(vm.uiState.value.messages.isEmpty())
+        assertNull(runtime.repository.getSession(sessionId))
+    }
+
+    @Test
+    fun `deleteSession leaves the other sessions alone`() {
+        val runtime = buildRuntime(ScriptedProvider(response("ok")))
+        val vm = viewModel(runtime)
+
+        vm.send("第一条")
+        waitFor { !vm.uiState.value.running && vm.uiState.value.currentSessionId != null }
+        val first = vm.uiState.value.currentSessionId!!
+
+        vm.startNewChat()
+        vm.send("第二条")
+        waitFor { !vm.uiState.value.running && vm.uiState.value.currentSessionId != null }
+        val second = vm.uiState.value.currentSessionId!!
+        assertTrue(first != second)
+
+        vm.deleteSession(first)
+
+        waitFor { vm.uiState.value.sessions.none { it.id == first } }
+        assertNull(runtime.repository.getSession(first))
+        // 当前会话不是被删的那个：投影与指针都不动
+        assertEquals(second, vm.uiState.value.currentSessionId)
+        assertNotNull(runtime.repository.getSession(second))
+    }
+
+    @Test
+    fun `deleteProject clears its sessions, sandbox files and returns to the default project`() {
+        val runtime = buildRuntime(ScriptedProvider(response("done")))
+        val vm = viewModel(runtime)
+
+        vm.createProject("临时项目")
+        waitFor { vm.uiState.value.projects.any { it.name == "临时项目" } }
+        val projectId = vm.uiState.value.projects.first { it.name == "临时项目" }.id
+
+        vm.switchProject(projectId)
+        waitFor { vm.uiState.value.currentProjectId == projectId }
+
+        // 沙箱里放一个文件，确认它随项目一起消失（而不是留成孤儿目录）
+        val note = File(tmp.root, "ws/$projectId/note.md")
+        note.parentFile?.mkdirs()
+        note.writeText("hi")
+
+        vm.send("写点什么")
+        waitFor { !vm.uiState.value.running && vm.uiState.value.currentSessionId != null }
+        val sessionIds = runtime.repository.listSessions()
+            .filter { it.projectId == projectId }
+            .map { it.id }
+        assertTrue(sessionIds.isNotEmpty())
+
+        vm.deleteProject(projectId)
+
+        waitFor { vm.uiState.value.projects.none { it.id == projectId } }
+        assertTrue(runtime.repository.listSessions().none { it.id in sessionIds })
+        assertFalse(note.exists())
+        assertEquals(ProjectLogic.DEFAULT_PROJECT_ID, vm.uiState.value.currentProjectId)
+        assertNull(vm.uiState.value.currentSessionId)
+    }
+
+    @Test
+    fun `deleteProject refuses the default project before touching anything`() {
+        val runtime = buildRuntime(ScriptedProvider(response("done")))
+        val vm = viewModel(runtime)
+
+        vm.send("留着")
+        waitFor { !vm.uiState.value.running && vm.uiState.value.currentSessionId != null }
+        val sessionId = vm.uiState.value.currentSessionId!!
+
+        vm.deleteProject(ProjectLogic.DEFAULT_PROJECT_ID)
+
+        // 拒绝必须发生在动手之前 —— 若只在注册表那一步拦，会话和沙箱会先被清空
+        assertEquals("默认项目不可删除", vm.uiState.value.runError)
+        assertTrue(vm.uiState.value.projects.any { it.id == ProjectLogic.DEFAULT_PROJECT_ID })
+        assertNotNull(runtime.repository.getSession(sessionId))
     }
 }

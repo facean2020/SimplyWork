@@ -16,6 +16,9 @@ interface FileChangeLog {
 
     /** 某会话的改动，按时间升序（旧 → 新）。没有记录返回空表。 */
     suspend fun changes(sessionId: String): List<FileChange>
+
+    /** 删除某会话的全部改动记录（会话被删时）。没有记录是 no-op。 */
+    suspend fun delete(sessionId: String)
 }
 
 /** JVM 测试用实现（无文件系统依赖）。 */
@@ -29,6 +32,10 @@ class InMemoryFileChangeLog : FileChangeLog {
 
     override suspend fun changes(sessionId: String): List<FileChange> =
         bySession[sessionId].orEmpty().toList()
+
+    override suspend fun delete(sessionId: String) {
+        bySession.remove(sessionId)
+    }
 }
 
 /**
@@ -58,6 +65,10 @@ class JsonFileChangeLog(
 
     override suspend fun changes(sessionId: String): List<FileChange> = mutex.withLock {
         read(sessionId)
+    }
+
+    override suspend fun delete(sessionId: String) {
+        mutex.withLock { fileFor(sessionId).delete() }
     }
 
     private fun read(sessionId: String): List<FileChange> {

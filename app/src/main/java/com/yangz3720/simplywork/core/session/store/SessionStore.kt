@@ -37,6 +37,12 @@ interface SessionStore {
 
     /** Returns the State Memory blob or null when never written. */
     fun loadState(sessionId: String): String?
+
+    /**
+     * Deletes a session row together with its nodes and State Memory blob. Irreversible —
+     * the payload file is the [PayloadStore]'s to remove (see [PayloadStore.delete]).
+     */
+    fun deleteSession(sessionId: String)
 }
 
 /** Location of a payload record inside its JSONL file. */
@@ -54,4 +60,7 @@ interface PayloadStore {
 
     /** Returns the payload line for [nodeId] or null when absent (P2: callers surface this). */
     fun read(sessionId: String, nodeId: String): String?
+
+    /** Removes the session's whole JSONL file (session deletion). Absent file is a no-op. */
+    fun delete(sessionId: String)
 }
