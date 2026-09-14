@@ -3,6 +3,7 @@ import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.cert.Certificate
 import java.util.Base64
+import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
@@ -49,6 +50,29 @@ val msalSignatureHash: String = (findProperty("msalSignatureHash") as String?)
     ?: debugKeystoreSignatureHash()
     ?: "REPLACE-WITH-SIGNATURE-HASH"
 
+/**
+ * 发布签名凭证（V1.0）：只从 `local.properties`（已 gitignore）读，仓库里不留任何密钥材料。
+ * 缺任意一项就不建 signingConfig —— 别的机器/CI 上 debug 构建照常，release 产物则显式叫
+ * `app-release-unsigned.apk`，而不是拿空口令去签出一个看着像正式包的残次品。
+ *
+ * `RELEASE_STORE_FILE` 相对**仓库根**解析（下面的 `rootProject.file`），与 `keystore/`
+ * 放根目录的布局一致。注意这是配置期读取的未声明输入：改了 local.properties 后配置缓存
+ * 可能仍用旧值，`--rerun-tasks` 可强制刷新（与上面 msalSignatureHash 同一个坑）。
+ */
+val releaseSigning: Map<String, String> = run {
+    val props = Properties()
+    rootProject.file("local.properties").takeIf { file -> file.isFile }?.inputStream()?.use { stream ->
+        props.load(stream)
+    }
+    listOf(
+        "RELEASE_STORE_FILE",
+        "RELEASE_STORE_PASSWORD",
+        "RELEASE_KEY_ALIAS",
+        "RELEASE_KEY_PASSWORD"
+    ).associateWith { key -> props.getProperty(key).orEmpty() }
+}
+val releaseSigningReady: Boolean = releaseSigning.values.all { it.isNotBlank() }
+
 android {
     namespace = "com.yangz3720.simplywork"
     compileSdk = 35
@@ -69,13 +93,30 @@ android {
         manifestPlaceholders["msalSignatureHash"] = msalSignatureHash
     }
 
+    signingConfigs {
+        // 凭证齐全才建：否则 release 退化成未签名产物（名字里带 -unsigned，不静默）。
+        if (releaseSigningReady) {
+            create("release") {
+                storeFile = rootProject.file(releaseSigning.getValue("RELEASE_STORE_FILE"))
+                storePassword = releaseSigning.getValue("RELEASE_STORE_PASSWORD")
+                keyAlias = releaseSigning.getValue("RELEASE_KEY_ALIAS")
+                keyPassword = releaseSigning.getValue("RELEASE_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // V1.0 裁剪：R8 代码裁剪 + 资源压缩。第三方库的 keep 规则在
+            // app/proguard-rules.pro，那里逐条注明了是给谁加的 —— 这条路径剪坏东西
+            // 只在运行时暴露，所以每次改规则都要真机跑一遍。
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfig = signingConfigs.findByName("release")
         }
     }
     compileOptions {
