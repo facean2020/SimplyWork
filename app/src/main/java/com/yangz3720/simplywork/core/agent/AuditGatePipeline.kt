@@ -28,7 +28,16 @@ class AuditGatePipeline(
     private val registry: AgentToolRegistry,
     private val approvalHandler: AuditApprovalHandler = AuditApprovalHandler.AutoApprove,
     private val sanitizer: ToolResultSanitizer = ToolResultSanitizer.Identity,
-    private val maxToolResultChars: Int = 8_000
+    private val maxToolResultChars: Int = 8_000,
+    /**
+     * 自动批准（v1.1，来自 [AgentConfig]）：默认每次 USER_CONFIRMING 都问人；开启后只有
+     * **不可逆**的调用（[RegisteredTool.destructive]）才问 —— 读位置、查日历、拉起应用
+     * 每次都确认只是摩擦，而删文件必须留下人的一拍。
+     *
+     * 默认 false：这是最保守的一侧，且保持与旧行为一致（单元测试的既有预期不受影响）。
+     * 产品层的默认值由 `KeyringState` 决定。
+     */
+    private val autoApproveNonDestructive: Boolean = false
 ) {
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -54,11 +63,23 @@ class AuditGatePipeline(
         }
 
         val effectiveDanger = tool.instanceDangerLevel?.invoke(parsed) ?: tool.dangerLevel
-        if (effectiveDanger == DangerLevel.USER_CONFIRMING) {
+        if (requiresUserApproval(tool, effectiveDanger)) {
             val approved = approvalHandler.approve(toolCall.name, rawArguments, effectiveDanger)
             if (!approved) return AuditDecision.Denied("User declined approval for ${toolCall.name}")
         }
         return AuditDecision.Approved(tool, parsed)
+    }
+
+    /**
+     * 是否需要弹窗问人。
+     *
+     * 自动批准只对"非不可逆"的 USER_CONFIRMING 调用生效：删除类与开关无关，永远走
+     * [approvalHandler] —— 一个能被设置关掉的删除确认等于没有确认。
+     */
+    private fun requiresUserApproval(tool: RegisteredTool, level: DangerLevel): Boolean = when {
+        level != DangerLevel.USER_CONFIRMING -> false
+        tool.destructive -> true
+        else -> !autoApproveNonDestructive
     }
 
     /**

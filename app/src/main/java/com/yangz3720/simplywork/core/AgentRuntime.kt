@@ -87,7 +87,12 @@ class AgentRuntime private constructor(
             selfOps?.invoke(repository)?.forEach(registry::register)
 
             val queue = MessageQueueManager()
-            val auditGate = AuditGatePipeline(registry, approvalHandler = approvalHandler, maxToolResultChars = config.maxToolResultChars)
+            val auditGate = AuditGatePipeline(
+                registry,
+                approvalHandler = approvalHandler,
+                maxToolResultChars = config.maxToolResultChars,
+                autoApproveNonDestructive = config.autoApproveNonDestructive
+            )
             val assembler = AgentContextAssembler(repository, registry, config, skillInjector)
             val compactor = ContextCompactor(repository, summarizer, estimator, config)
             val coordinator = AgentLoopCoordinator(

@@ -81,8 +81,9 @@ android {
         applicationId = "com.yangz3720.simplywork"
         minSdk = 34
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        // V1.1：修 V1.0 的 5 个体验问题（弹窗形态、密钥打码、上下文窗口、自动批准）。
+        versionCode = 2
+        versionName = "1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

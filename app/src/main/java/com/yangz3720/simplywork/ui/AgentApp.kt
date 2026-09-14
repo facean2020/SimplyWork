@@ -88,10 +88,15 @@ private fun SettingsScreenRoute(viewModel: AgentViewModel, onBack: () -> Unit) {
     val state by viewModel.uiState.collectAsState()
     SettingsScreen(
         accounts = state.providerAccounts,
+        autoApproveNonDestructive = state.autoApproveNonDestructive,
+        contextBudget = state.contextBudget,
+        contextPromptTokens = state.contextPromptTokens,
         onBack = onBack,
         onSaveKey = { id, key -> viewModel.saveAccountKey(id, key) },
         onAddCustom = { name, url, key -> viewModel.addCustomAccount(name, url, key) },
-        onRemoveCustom = { id -> viewModel.removeCustomAccount(id) }
+        onRemoveCustom = { id -> viewModel.removeCustomAccount(id) },
+        onToggleAutoApprove = { viewModel.setAutoApproveNonDestructive(it) },
+        onSetContextBudget = { viewModel.setContextBudgetOverride(it) }
     )
 }
 

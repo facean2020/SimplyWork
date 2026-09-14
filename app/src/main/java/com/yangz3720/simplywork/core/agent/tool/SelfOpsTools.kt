@@ -576,6 +576,8 @@ object SelfOpsTools {
             )
         ),
         dangerLevel = DangerLevel.USER_CONFIRMING,
+        // 全 App 唯一会不可逆删数据的工具：自动批准（v1.1）下它仍然必须问人。
+        destructive = true,
         parser = { raw -> Result.success(decode<FsDeleteInput>(raw)) },
         runner = { parsed, context ->
             guarded {
