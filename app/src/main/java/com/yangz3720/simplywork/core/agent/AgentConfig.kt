@@ -18,6 +18,13 @@ data class AgentConfig(
     val llmTimeoutMs: Long = 120_000L,
     /** Post-tool gate truncation budget (§8.4). */
     val maxToolResultChars: Int = 8_000,
+    /**
+     * 自动批准（v1.1）：USER_CONFIRMING 的工具默认每次都弹窗问人；开启后只有**不可逆**的
+     * 调用（`RegisteredTool.destructive`，目前只有 fs_delete）才拦下来。
+     *
+     * 默认 false（最保守，且与旧行为一致）；产品层默认开启，由 `KeyringState` 决定。
+     */
+    val autoApproveNonDestructive: Boolean = false,
     /** Base system prompt injected once per session and used in every request. */
     val systemPrompt: String = DEFAULT_SYSTEM_PROMPT
 ) {

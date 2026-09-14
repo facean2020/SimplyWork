@@ -24,7 +24,8 @@ class AuditGatePipelineTest {
         name: String,
         danger: DangerLevel,
         parseOk: Boolean = true,
-        instanceDanger: ((Any?) -> DangerLevel)? = null
+        instanceDanger: ((Any?) -> DangerLevel)? = null,
+        destructive: Boolean = false
     ) = RegisteredTool(
         definition = ToolDefinition(name = name, description = "", parametersSchema = buildJsonObject { put("type", "object") }),
         dangerLevel = danger,
@@ -34,7 +35,8 @@ class AuditGatePipelineTest {
                 ?: Result.failure(IllegalArgumentException("missing required field x"))
         },
         runner = { _, _ -> buildJsonObject { put("ok", true) } },
-        instanceDangerLevel = instanceDanger
+        instanceDangerLevel = instanceDanger,
+        destructive = destructive
     )
 
     private fun call(name: String, argsJson: String = """{"x":1}""") =
@@ -106,6 +108,97 @@ class AuditGatePipelineTest {
 
         val direct = declining.preToolAudit(call("calendar", """{"x":"DIRECT_WRITE"}"""))
         assertTrue(direct is AuditGatePipeline.AuditDecision.Denied)
+    }
+
+    // ----- 自动批准（v1.1）：只有不可逆的调用才留给人 -----
+
+    @Test
+    fun `A6 auto-approve passes non-destructive confirmations without asking`() = runTest {
+        val registry = AgentToolRegistry().apply {
+            register(tool("location", DangerLevel.USER_CONFIRMING))
+            register(tool("open_app", DangerLevel.USER_CONFIRMING))
+        }
+        var asked = 0
+        val gate = AuditGatePipeline(
+            registry,
+            approvalHandler = AuditApprovalHandler { _, _, _ -> asked++; true },
+            autoApproveNonDestructive = true
+        )
+
+        assertTrue(gate.preToolAudit(call("location")) is AuditGatePipeline.AuditDecision.Approved)
+        assertTrue(gate.preToolAudit(call("open_app")) is AuditGatePipeline.AuditDecision.Approved)
+        // 关键：不是"自动答了是"，而是**根本没问** —— 否则弹窗还会闪一下
+        assertEquals(0, asked)
+    }
+
+    @Test
+    fun `A7 auto-approve still consults the handler for destructive tools`() = runTest {
+        val registry = AgentToolRegistry().apply {
+            register(tool("fs_delete", DangerLevel.USER_CONFIRMING, destructive = true))
+        }
+        var asked = 0
+        val gate = AuditGatePipeline(
+            registry,
+            approvalHandler = AuditApprovalHandler { _, _, _ -> asked++; false },
+            autoApproveNonDestructive = true
+        )
+
+        val decision = gate.preToolAudit(call("fs_delete"))
+        // 一个能被开关关掉的删除确认等于没有确认：destructive 与 autoApprove 无关。
+        assertEquals(1, asked)
+        assertTrue(decision is AuditGatePipeline.AuditDecision.Denied)
+    }
+
+    @Test
+    fun `A8 auto-approve off asks for every confirmation including destructive ones`() = runTest {
+        val registry = AgentToolRegistry().apply {
+            register(tool("location", DangerLevel.USER_CONFIRMING))
+            register(tool("fs_delete", DangerLevel.USER_CONFIRMING, destructive = true))
+        }
+        var asked = 0
+        val gate = AuditGatePipeline(
+            registry,
+            approvalHandler = AuditApprovalHandler { _, _, _ -> asked++; true },
+            autoApproveNonDestructive = false
+        )
+
+        assertTrue(gate.preToolAudit(call("location")) is AuditGatePipeline.AuditDecision.Approved)
+        assertTrue(gate.preToolAudit(call("fs_delete")) is AuditGatePipeline.AuditDecision.Approved)
+        assertEquals(2, asked)
+    }
+
+    @Test
+    fun `A9 auto-approve keeps instance refinement and safe levels intact`() = runTest {
+        val registry = AgentToolRegistry().apply {
+            register(tool("safe", DangerLevel.SAFE))
+            register(
+                tool("calendar", DangerLevel.USER_VISIBLE, instanceDanger = { parsed ->
+                    if ((parsed as? kotlinx.serialization.json.JsonElement).toString().contains("DIRECT_WRITE")) {
+                        DangerLevel.USER_CONFIRMING
+                    } else {
+                        DangerLevel.USER_VISIBLE
+                    }
+                })
+            )
+        }
+        var asked = 0
+        val gate = AuditGatePipeline(
+            registry,
+            approvalHandler = AuditApprovalHandler { _, _, _ -> asked++; true },
+            autoApproveNonDestructive = true
+        )
+
+        assertTrue(gate.preToolAudit(call("safe")) is AuditGatePipeline.AuditDecision.Approved)
+        assertTrue(
+            gate.preToolAudit(call("calendar", """{"x":"EDITOR_INTENT"}"""))
+                is AuditGatePipeline.AuditDecision.Approved
+        )
+        // 提升到 USER_CONFIRMING 但不可逆 → 自动批准，仍不问
+        assertTrue(
+            gate.preToolAudit(call("calendar", """{"x":"DIRECT_WRITE"}"""))
+                is AuditGatePipeline.AuditDecision.Approved
+        )
+        assertEquals(0, asked)
     }
 
     @Test

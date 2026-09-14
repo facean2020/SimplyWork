@@ -5,6 +5,8 @@ import android.content.SharedPreferences
 import com.yangz3720.simplywork.core.AgentRuntime
 import com.yangz3720.simplywork.core.agent.tool.AgentSelfConfig
 import com.yangz3720.simplywork.core.agent.tool.SelfOpsTools
+import com.yangz3720.simplywork.core.agent.ContextBudget
+import com.yangz3720.simplywork.core.agent.ContextBudgetPlan
 import com.yangz3720.simplywork.core.cloud.CloudFolder
 import com.yangz3720.simplywork.core.cloud.OneDriveAccount
 import com.yangz3720.simplywork.core.cloud.OneDriveOwner
@@ -83,6 +85,9 @@ class AgentViewModelTest {
     private class FakeOwner(var runtime: AgentRuntime?) : AgentRuntimeOwner {
         val accounts = ModelProviderPresets.ALL.toMutableList()
         var selection: ModelSelection? = null
+        var autoApprove: Boolean = true
+        var contextOverride: Int? = null
+        var providerContextTokens: Int? = null
         var savedKey: Pair<String, String>? = null
         var appliedSelection: ModelSelection? = null
         var fetchedAccount: ProviderAccount? = null
@@ -97,6 +102,11 @@ class AgentViewModelTest {
         override fun upsertCustomAccount(name: String, baseUrl: String, apiKey: String) =
             ProviderAccount(id = "custom-x", name = name, baseUrl = baseUrl, apiKey = apiKey)
         override fun removeCustomAccount(accountId: String) { /* no-op */ }
+        override fun autoApproveNonDestructive(): Boolean = autoApprove
+        override fun setAutoApproveNonDestructive(enabled: Boolean) { autoApprove = enabled }
+        override fun contextBudget(): ContextBudgetPlan =
+            ContextBudget.resolve(contextOverride, providerContextTokens, "test-model")
+        override fun setContextBudgetOverride(tokens: Int?) { contextOverride = tokens }
         override fun applySelection(providerId: String, model: String) {
             appliedSelection = ModelSelection(providerId, model)
             selection = appliedSelection

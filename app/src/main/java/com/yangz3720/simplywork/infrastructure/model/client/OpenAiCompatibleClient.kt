@@ -1,6 +1,7 @@
 package com.yangz3720.simplywork.infrastructure.model.client
 
 import com.yangz3720.simplywork.infrastructure.error.InfrastructureException
+import com.yangz3720.simplywork.infrastructure.model.ModelInfo
 import com.yangz3720.simplywork.infrastructure.model.ModelProvider
 import com.yangz3720.simplywork.infrastructure.model.config.ModelCapability
 import com.yangz3720.simplywork.infrastructure.model.config.ModelConfig
@@ -57,6 +58,11 @@ class OpenAiCompatibleClient(
 
     private val tag = "OpenAiClient"
 
+    /** 上下文长度可能的字段名，见 [contextTokensOf]。 */
+    private val CONTEXT_KEYS = listOf(
+        "context_length", "context_window", "max_context_length", "max_input_tokens", "max_model_len"
+    )
+
     /** 一次性客户端（模型列表拉取等临时实例）用完关闭底层引擎，避免线程泄漏。 */
     fun close() {
         client.close()
@@ -96,7 +102,7 @@ class OpenAiCompatibleClient(
      * OpenAI-compatible `GET {base}/models` → sorted model ids（设置页"获取模型列表"）。
      * 请求头与 generate 相同（Bearer + custom headers）。
      */
-    override suspend fun listModels(): Result<List<String>> = runCatching {
+    override suspend fun listModelCatalog(): Result<List<ModelInfo>> = runCatching {
         val endpoint = "${config.baseUrl.trimEnd('/')}/models"
         AgentLogger.d(tag) { "==> GET $endpoint" }
 
@@ -114,13 +120,37 @@ class OpenAiCompatibleClient(
         val data = json.parseToJsonElement(responseBody).jsonObject["data"]?.jsonArray
         data.orEmpty()
             .mapNotNull { entry ->
-                (entry as? JsonObject)?.get("id")
-                    ?.let { id -> id as? kotlinx.serialization.json.JsonPrimitive }
-                    ?.takeIf { it.isString }
-                    ?.content
+                val obj = entry as? JsonObject ?: return@mapNotNull null
+                val id = obj["id"]?.jsonPrimitive?.takeIf { it.isString }?.content ?: return@mapNotNull null
+                ModelInfo(id = id, contextTokens = contextTokensOf(obj))
             }
-            .sorted()
+            .sortedBy { it.id }
     }
+
+    /** 只有 id 的旧接口：由 [listModelCatalog] 派生，保证两条路径打的是同一个端点。 */
+    override suspend fun listModels(): Result<List<String>> =
+        listModelCatalog().map { catalog -> catalog.map { it.id } }
+
+    /**
+     * 从 /models 的一个条目里读上下文长度。
+     *
+     * OpenAI 的规范只保证 `id`，上下文长度的字段名各家自便：OpenRouter 用
+     * `context_length`，有的用 `context_window` / `max_context_length` /
+     * `max_input_tokens`，llama.cpp 塞在 `meta.n_ctx_train`，OpenRouter 还会把它放在
+     * 嵌套的 `top_provider` 里。所以逐个试，认不出就返回 null —— **绝不在这里编一个
+     * 猜测值**：高估模型上下文会让请求被服务端直接拒掉，比"不知道"危险得多。
+     */
+    private fun contextTokensOf(entry: JsonObject): Int? {
+        CONTEXT_KEYS.firstNotNullOfOrNull { key -> entry.positiveInt(key) }?.let { return it }
+        (entry["top_provider"] as? JsonObject)?.let { nested ->
+            CONTEXT_KEYS.firstNotNullOfOrNull { key -> nested.positiveInt(key) }?.let { return it }
+        }
+        (entry["meta"] as? JsonObject)?.positiveInt("n_ctx_train")?.let { return it }
+        return null
+    }
+
+    private fun JsonObject.positiveInt(key: String): Int? =
+        (this[key] as? JsonPrimitive)?.content?.toIntOrNull()?.takeIf { it > 0 }
 
     override fun generateStream(request: ModelRequest): Flow<ModelStreamChunk> = flow {
         val endpoint = resolveEndpoint()

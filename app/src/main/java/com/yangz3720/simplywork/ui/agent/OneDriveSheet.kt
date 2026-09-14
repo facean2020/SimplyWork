@@ -1,10 +1,13 @@
 package com.yangz3720.simplywork.ui.agent
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -13,20 +16,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.Button
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -37,6 +39,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.yangz3720.simplywork.core.cloud.CloudFolder
 import com.yangz3720.simplywork.core.cloud.OneDriveAccount
 import com.yangz3720.simplywork.core.cloud.SyncState
@@ -51,7 +55,7 @@ private const val ROOT_ID = "root"
 /**
  * 面板高度上限（内容少时面板按内容收紧，这只是一个上限）。
  */
-private val SHEET_MAX_HEIGHT = 560.dp
+private val PANEL_MAX_HEIGHT = 640.dp
 
 /**
  * 单个文件夹行的**固定**行高。它是 [LIST_MAX_HEIGHT] 的计量单位：行高被写死，列表
@@ -60,14 +64,19 @@ private val SHEET_MAX_HEIGHT = 560.dp
  */
 private val FOLDER_ROW_HEIGHT = 44.dp
 
-/** 文件夹列表最多显示 4 整行，多出来的自己滚。 */
-private val LIST_MAX_HEIGHT = FOLDER_ROW_HEIGHT * 4
+/** 文件夹列表最多显示 6 整行，多出来的自己滚。 */
+private val LIST_MAX_HEIGHT = FOLDER_ROW_HEIGHT * 6
 
 /**
  * 项目 ↔ 云端文件夹的挂接面板（v1.4）。一个弹层走完全部流程：登录 → 挑文件夹 →
  * 自动对齐 → 看状态 → 同步 / 取消关联。
  *
- * 挑选是**浏览式**的：点一行进下一层，目标层级由底部的「选择此文件夹」确认。不再有
+ * v1.1：从底部面板（`ModalBottomSheet`）改成**大弹窗**。原因是底部面板把手势当成了
+ * 控制方式 —— 挑文件夹时手往下滑本想翻列表，却直接把整个面板滑走了，人得从头再来一遍。
+ * 弹窗不接管下拉手势，列表怎么滚都不会把面板弄没；面板也更高，一屏能看 6 行而不是 4 行。
+ * 代价是失去了"下滑关闭"，所以补上一个显式的「关闭」按钮和系统返回键。
+ *
+ * 挑选仍然是**浏览式**的：点一行进下一层，目标层级由底部的「选择此文件夹」确认。没有
  * 每行的双按钮，也不用为了挑一个已存在的文件夹打字。新建文件夹退成一个小入口 ——
  * 它是唯一躲不掉输入名字的动作。
  *
@@ -79,7 +88,6 @@ private val LIST_MAX_HEIGHT = FOLDER_ROW_HEIGHT * 4
  * 网盘根不可选：整盘同步会把删除传播放大到不可控范围，所以底部的确认按钮在根层
  * 直接禁用并说明原因，而不是让人点下去再报错。
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun OneDriveSheet(
     project: Project,
@@ -112,135 +120,158 @@ fun OneDriveSheet(
         if (account != null) onBrowse(current.id, current.path)
     }
 
-    ModalBottomSheet(
+    // 弹窗不接管下拉手势，所以"返回"必须由我们兜住，否则只能靠点「关闭」。
+    BackHandler { onDismiss() }
+
+    Dialog(
         onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        // 默认宽度的对话框装不下文件夹列表；放开宽度限制后自己用 0.94 的宽度留出边距。
+        properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
-        Column(
+        Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(max = SHEET_MAX_HEIGHT)
+                .fillMaxSize()
                 .imePadding()
-                .padding(horizontal = 20.dp)
-                .padding(bottom = 28.dp)
+                .padding(horizontal = 16.dp),
+            contentAlignment = Alignment.Center
         ) {
-            Text("OneDrive", style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.size(10.dp))
-
-            when {
-                !configured -> Text(
-                    text = "尚未配置：请在 gradle.properties 填入 msalClientId（见 docs/PlaningStages/onedrive-setup.md）。",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.error
-                )
-
-                account == null -> Button(onClick = onConnect) { Text("登录 Microsoft 账号") }
-
-                else -> {
-                    AccountLine(username = account.username, onDisconnect = onDisconnect)
-                    Spacer(Modifier.size(12.dp))
-
-                    val binding = project.oneDrive
-                    if (binding != null) {
-                        BoundPanel(
-                            folderPath = binding.folderPath,
-                            lastSyncedAt = binding.lastSyncedAt,
-                            onSyncNow = onSyncNow,
-                            onUnbind = onUnbind
-                        )
-                    } else {
-                        PathRow(
-                            path = current.path,
-                            canGoUp = stack.size > 1,
-                            onGoUp = { stack = stack.dropLast(1) }
-                        )
-                        Spacer(Modifier.size(4.dp))
-
-                        LazyColumn(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = LIST_MAX_HEIGHT)
-                        ) {
-                            when {
-                                busy -> item { Hint("读取中…") }
-                                folders.isEmpty() -> item { Hint("这一层没有子文件夹。") }
-                                else -> items(folders, key = { it.id }) { folder ->
-                                    FolderRow(name = folder.name, onClick = { stack = stack + folder })
-                                }
-                            }
+            Surface(
+                shape = RoundedCornerShape(24.dp),
+                color = MaterialTheme.colorScheme.surface,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = PANEL_MAX_HEIGHT)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp)
+                        .padding(top = 16.dp, bottom = 24.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("OneDrive", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                        TextButton(onClick = onDismiss) {
+                            Text("关闭", style = MaterialTheme.typography.labelLarge)
                         }
+                    }
+                    Spacer(Modifier.size(4.dp))
 
-                        Spacer(Modifier.size(10.dp))
-                        Hint(
-                            if (atRoot) "根目录不能直接同步，请进入下一层"
-                            else "项目为空会下载云端内容，有文件会上传"
+                    when {
+                        !configured -> Text(
+                            text = "尚未配置：请在 gradle.properties 填入 msalClientId（见 docs/PlaningStages/onedrive-setup.md）。",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.error
                         )
-                        Spacer(Modifier.size(8.dp))
 
-                        if (naming) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                OutlinedTextField(
-                                    value = draft,
-                                    onValueChange = { draft = it },
-                                    singleLine = true,
-                                    placeholder = {
-                                        Text("新文件夹名称", style = MaterialTheme.typography.bodyMedium)
-                                    },
-                                    modifier = Modifier.weight(1f)
+                        account == null -> Button(onClick = onConnect) { Text("登录 Microsoft 账号") }
+
+                        else -> {
+                            AccountLine(username = account.username, onDisconnect = onDisconnect)
+                            Spacer(Modifier.size(12.dp))
+
+                            val binding = project.oneDrive
+                            if (binding != null) {
+                                BoundPanel(
+                                    folderPath = binding.folderPath,
+                                    lastSyncedAt = binding.lastSyncedAt,
+                                    onSyncNow = onSyncNow,
+                                    onUnbind = onUnbind
                                 )
-                                Spacer(Modifier.size(8.dp))
-                                TextButton(
-                                    onClick = {
-                                        val name = draft.trim()
-                                        if (name.isNotEmpty()) {
-                                            onCreateAndBind(current.id, current.path, name)
-                                            draft = ""
-                                            naming = false
-                                        }
-                                    },
-                                    enabled = draft.isNotBlank()
-                                ) { Text("新建并使用") }
-                            }
-                        } else {
-                            TextButton(onClick = { naming = true }) {
-                                Icon(
-                                    Icons.Filled.Add,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
+                            } else {
+                                PathRow(
+                                    path = current.path,
+                                    canGoUp = stack.size > 1,
+                                    onGoUp = { stack = stack.dropLast(1) }
                                 )
                                 Spacer(Modifier.size(4.dp))
-                                Text("新建文件夹")
+
+                                LazyColumn(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(max = LIST_MAX_HEIGHT)
+                                ) {
+                                    when {
+                                        busy -> item { Hint("读取中…") }
+                                        folders.isEmpty() -> item { Hint("这一层没有子文件夹。") }
+                                        else -> items(folders, key = { it.id }) { folder ->
+                                            FolderRow(name = folder.name, onClick = { stack = stack + folder })
+                                        }
+                                    }
+                                }
+
+                                Spacer(Modifier.size(10.dp))
+                                Hint(
+                                    if (atRoot) "根目录不能直接同步，请进入下一层"
+                                    else "项目为空会下载云端内容，有文件会上传"
+                                )
+                                Spacer(Modifier.size(8.dp))
+
+                                if (naming) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        OutlinedTextField(
+                                            value = draft,
+                                            onValueChange = { draft = it },
+                                            singleLine = true,
+                                            placeholder = {
+                                                Text("新文件夹名称", style = MaterialTheme.typography.bodyMedium)
+                                            },
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Spacer(Modifier.size(8.dp))
+                                        TextButton(
+                                            onClick = {
+                                                val name = draft.trim()
+                                                if (name.isNotEmpty()) {
+                                                    onCreateAndBind(current.id, current.path, name)
+                                                    draft = ""
+                                                    naming = false
+                                                }
+                                            },
+                                            enabled = draft.isNotBlank()
+                                        ) { Text("新建并使用") }
+                                    }
+                                } else {
+                                    TextButton(onClick = { naming = true }) {
+                                        Icon(
+                                            Icons.Filled.Add,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(Modifier.size(4.dp))
+                                        Text("新建文件夹")
+                                    }
+                                }
+                                // 根层不渲染这个按钮：一个永远点不动的灰色大块只是视觉噪音，
+                                // 上面的提示已经说清"要往下进一层"。
+                                if (!atRoot) {
+                                    Spacer(Modifier.size(4.dp))
+                                    Button(
+                                        onClick = { onBind(current) },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) { Text("选择此文件夹") }
+                                }
+                            }
+
+                            // 有显式错误行时不再叠一行状态，否则同一句话会显示两遍。
+                            if (error == null && syncState.showable(bound = binding != null)) {
+                                Spacer(Modifier.size(10.dp))
+                                StatusLine(syncState)
                             }
                         }
-                        // 根层不渲染这个按钮：一个永远点不动的灰色大块只是视觉噪音，
-                        // 上面的提示已经说清"要往下进一层"。
-                        if (!atRoot) {
-                            Spacer(Modifier.size(4.dp))
-                            Button(
-                                onClick = { onBind(current) },
-                                modifier = Modifier.fillMaxWidth()
-                            ) { Text("选择此文件夹") }
+                    }
+
+                    error?.let { message ->
+                        Spacer(Modifier.size(10.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = message,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(onClick = onDismissError) { Text("知道了") }
                         }
                     }
-
-                    // 有显式错误行时不再叠一行状态，否则同一句话会显示两遍。
-                    if (error == null && syncState.showable(bound = binding != null)) {
-                        Spacer(Modifier.size(10.dp))
-                        StatusLine(syncState)
-                    }
-                }
-            }
-
-            error?.let { message ->
-                Spacer(Modifier.size(10.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = message,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.weight(1f)
-                    )
-                    TextButton(onClick = onDismissError) { Text("知道了") }
                 }
             }
         }

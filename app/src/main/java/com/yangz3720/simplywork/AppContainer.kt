@@ -3,7 +3,10 @@ package com.yangz3720.simplywork
 import android.content.Context
 import android.content.SharedPreferences
 import com.yangz3720.simplywork.core.AgentRuntime
+import com.yangz3720.simplywork.core.agent.AgentConfig
 import com.yangz3720.simplywork.core.agent.AuditApprovalHandler
+import com.yangz3720.simplywork.core.agent.ContextBudget
+import com.yangz3720.simplywork.core.agent.ContextBudgetPlan
 import com.yangz3720.simplywork.core.agent.tool.AgentSelfConfig
 import com.yangz3720.simplywork.core.agent.tool.SelfOpsTools
 import com.yangz3720.simplywork.core.cloud.OneDriveOwner
@@ -206,10 +209,29 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
         rebuildRuntime()
     }
 
+    override fun autoApproveNonDestructive(): Boolean = keyring.state.autoApproveNonDestructive
+
+    override fun setAutoApproveNonDestructive(enabled: Boolean) {
+        mutateKeyring { KeyringLogic.withAutoApprove(it, enabled) }
+        // 门禁把开关持在构造参数里，所以改完必须重建才生效（与超时/选择同一条路径）。
+        rebuildRuntime()
+    }
+
+    override fun contextBudget(): ContextBudgetPlan = contextBudgetPlan()
+
+    override fun setContextBudgetOverride(tokens: Int?) {
+        mutateKeyring { KeyringLogic.withContextBudgetOverride(it, tokens) }
+        // 预算进了 AgentConfig（压缩阈值 + 工作窗口），同样要重建才生效。
+        rebuildRuntime()
+    }
+
     /**
      * 按服务商账号拉取模型列表（GET /models）。一次性临时客户端 + IO 线程 +
      * Throwable 兜底：OkHttp 对非 IOException 会在回调后原样 rethrow 到线程池
      * （进程级 FATAL），这里统一收编为 Result（取消除外）。
+     *
+     * v1.1：顺手把服务商报来的**上下文长度**记下来。模型列表本来就会为选择器拉一次，
+     * 所以学这个是零额外请求 —— 而上下文预算正需要它（见 [contextBudgetPlan]）。
      */
     override suspend fun fetchModels(account: ProviderAccount): Result<List<String>> =
         withContext(Dispatchers.IO) {
@@ -222,7 +244,20 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
                 )
             )
             try {
-                client.listModels()
+                client.listModelCatalog()
+                    .onSuccess { catalog ->
+                        mutateKeyring { state ->
+                            KeyringLogic.withModelContexts(
+                                state,
+                                catalog.mapNotNull { info ->
+                                    info.contextTokens?.let {
+                                        KeyringLogic.contextKey(account.id, info.id) to it
+                                    }
+                                }.toMap()
+                            )
+                        }
+                    }
+                    .map { catalog -> catalog.map { it.id } }
             } catch (e: CancellationException) {
                 throw e
             } catch (t: Throwable) {
@@ -268,6 +303,7 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
             appContext,
             createProvider(config),
             router,
+            config = agentConfig(),
             approvalHandler = AuditApprovalHandler { toolName, arguments, _ ->
                 approvalCoordinator.request(toolName, arguments.toString())
             },
@@ -281,6 +317,35 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
                 )
             }
         )
+
+    /**
+     * 用户设置 → 循环/门禁参数（v1.1）。集中在这里翻译，别处只认 [AgentConfig] 的语义。
+     */
+    private fun agentConfig(): AgentConfig {
+        val plan = contextBudgetPlan()
+        return AgentConfig(
+            autoApproveNonDestructive = keyring.state.autoApproveNonDestructive,
+            // 装不下就压；工作窗口跟着预算同比放大（见 ContextBudget 的推导表）。
+            compactionTriggerTokens = plan.compactionTriggerTokens,
+            workingTokenBudget = plan.workingTokenBudget
+        )
+    }
+
+    /**
+     * 当前模型的上下文预算：手动覆盖 > 服务商报的 > 模型名里的规格 > 历史默认。
+     * 裁决本身是纯函数（[ContextBudget.resolve]），这里只负责把三个候选值取出来。
+     */
+    private fun contextBudgetPlan(): ContextBudgetPlan {
+        val state = keyring.state
+        val reported = state.activeId?.let { accountId ->
+            state.modelContextTokens[KeyringLogic.contextKey(accountId, state.activeModel)]
+        }
+        return ContextBudget.resolve(
+            overrideTokens = state.contextBudgetOverride,
+            providerTokens = reported,
+            modelId = state.activeModel
+        )
+    }
 
     private fun createProvider(config: ModelConfig): ModelProvider = OpenAiCompatibleClient(config)
 

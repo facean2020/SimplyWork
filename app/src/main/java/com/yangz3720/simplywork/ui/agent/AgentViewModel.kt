@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.yangz3720.simplywork.core.AgentRuntime
 import com.yangz3720.simplywork.core.agent.AgentStepEvent
+import com.yangz3720.simplywork.core.agent.ContextBudgetPlan
 import com.yangz3720.simplywork.core.agent.IncomingMessage
 import com.yangz3720.simplywork.core.cloud.CloudFolder
 import com.yangz3720.simplywork.core.cloud.OneDriveOwner
@@ -61,6 +62,18 @@ interface AgentRuntimeOwner {
     /** 对话屏顶栏：切换当前服务商 + 模型并重建运行时（调用方保证当前无运行中的 run）。 */
     fun applySelection(providerId: String, model: String)
 
+    /** 设置页（v1.1）：非删除类调用是否自动批准。 */
+    fun autoApproveNonDestructive(): Boolean
+
+    /** 设置页（v1.1）：切换自动批准（会重建运行时，使门禁拿到新策略）。 */
+    fun setAutoApproveNonDestructive(enabled: Boolean)
+
+    /** 设置页（v1.1）：当前模型的上下文预算（含它从哪来，设置页要如实展示）。 */
+    fun contextBudget(): ContextBudgetPlan
+
+    /** 设置页（v1.1）：手动指定上下文预算；null = 回到自动推导。 */
+    fun setContextBudgetOverride(tokens: Int?)
+
     /** 按服务商账号拉取端点可用模型列表（GET /models）。 */
     suspend fun fetchModels(account: ProviderAccount): Result<List<String>>
 }
@@ -102,7 +115,9 @@ class AgentViewModel(
             activeModel = selection?.model.orEmpty(),
             modelConfigured = selection != null && selection.model.isNotBlank(),
             projects = projectStore.list(),
-            currentProjectId = projectStore.currentId()
+            currentProjectId = projectStore.currentId(),
+            autoApproveNonDestructive = owner.autoApproveNonDestructive(),
+            contextBudget = owner.contextBudget()
         )
     }
 
@@ -171,7 +186,9 @@ class AgentViewModel(
                 runError = null,
                 todos = emptyList(),
                 // 新增文件卡片属于"这个会话产出了什么"，换会话就没有了。
-                newFiles = emptyList()
+                newFiles = emptyList(),
+                // 新会话还没发过请求，上下文用量归零（否则会显示上一个会话的数）。
+                contextPromptTokens = 0
             )
         }
     }
@@ -549,9 +566,23 @@ class AgentViewModel(
                 providerAccounts = owner.accounts(),
                 activeProviderId = selection?.providerId,
                 activeModel = selection?.model.orEmpty(),
-                modelConfigured = selection != null && selection.model.isNotBlank()
+                modelConfigured = selection != null && selection.model.isNotBlank(),
+                autoApproveNonDestructive = owner.autoApproveNonDestructive(),
+                contextBudget = owner.contextBudget()
             )
         }
+    }
+
+    /** 设置页：切换自动批准（删除类不受影响，永远弹窗）。 */
+    fun setAutoApproveNonDestructive(enabled: Boolean) {
+        owner.setAutoApproveNonDestructive(enabled)
+        _uiState.update { it.copy(autoApproveNonDestructive = owner.autoApproveNonDestructive()) }
+    }
+
+    /** 设置页：手动指定上下文预算；null = 回到自动推导（按模型上下文长度算）。 */
+    fun setContextBudgetOverride(tokens: Int?) {
+        owner.setContextBudgetOverride(tokens)
+        _uiState.update { it.copy(contextBudget = owner.contextBudget()) }
     }
 
     /** 顶栏动态切换模型：运行中拒绝（切换会重建运行时，打断当前 run）。 */
@@ -641,7 +672,11 @@ class AgentViewModel(
             is AgentStepEvent.InboundPersisted -> refreshConversation()
 
             is AgentStepEvent.ModelTurn -> {
-                _uiState.update { it.copy(iteration = event.iteration) }
+                // promptTokens 就是这一轮真正送进去的上下文大小 —— 压缩与否看的就是它，
+                // 所以直接把它当作"当前上下文用量"透出给设置页。
+                _uiState.update {
+                    it.copy(iteration = event.iteration, contextPromptTokens = event.promptTokens)
+                }
                 refreshConversation()
             }
 

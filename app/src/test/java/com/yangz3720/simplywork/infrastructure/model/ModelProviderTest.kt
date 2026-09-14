@@ -305,6 +305,61 @@ class ModelProviderTest {
     }
 
     @Test
+    fun testListModelCatalogReadsContextLengthFromTheShapesProvidersActuallyUse() = runTest {
+        val body = """
+            {"data":[
+                {"id":"openrouter-ish","context_length":128000},
+                {"id":"vllm-ish","max_input_tokens":"32000"},
+                {"id":"openrouter-nested","top_provider":{"context_length":200000}},
+                {"id":"llamacpp-ish","meta":{"n_ctx_train":8192}},
+                {"id":"openai-ish"},
+                {"id":"bad-value","context_length":"not-a-number"},
+                {"id":"zero-value","context_length":0}
+            ]}
+        """.trimIndent()
+        val mockEngine = MockEngine {
+            respond(
+                content = ByteReadChannel(body),
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json")
+            )
+        }
+        val client = OpenAiCompatibleClient(
+            ModelConfig(baseUrl = "https://api.example.com/v1", apiKey = "sk", defaultModel = "m"),
+            HttpClient(mockEngine) { install(ContentNegotiation) { json(json) } }
+        )
+
+        val catalog = client.listModelCatalog().getOrThrow().associate { it.id to it.contextTokens }
+
+        assertEquals(128_000, catalog["openrouter-ish"])
+        assertEquals(32_000, catalog["vllm-ish"])            // 字符串形式的数字也认
+        assertEquals(200_000, catalog["openrouter-nested"])  // 嵌套在 top_provider 里
+        assertEquals(8_192, catalog["llamacpp-ish"])         // llama.cpp 的 meta.n_ctx_train
+        // 端点没说 / 值不是正经正数 → null（= 未知），绝不猜一个数出来
+        assertNull(catalog["openai-ish"])
+        assertNull(catalog["bad-value"])
+        assertNull(catalog["zero-value"])
+    }
+
+    @Test
+    fun testListModelsStillReturnsSortedIdsFromTheCatalogPath() = runTest {
+        val mockEngine = MockEngine {
+            respond(
+                content = ByteReadChannel("""{"data":[{"id":"b-model","context_length":1000},{"id":"a-model"}]}"""),
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json")
+            )
+        }
+        val client = OpenAiCompatibleClient(
+            ModelConfig(baseUrl = "https://api.example.com/v1", apiKey = "sk", defaultModel = "m"),
+            HttpClient(mockEngine) { install(ContentNegotiation) { json(json) } }
+        )
+
+        // 只有 id 的旧接口必须与 catalog 路径给出同一个集合，且维持字典序
+        assertEquals(listOf("a-model", "b-model"), client.listModels().getOrThrow())
+    }
+
+    @Test
     fun testListModelsSurfacesHttpError() = runTest {
         val mockEngine = MockEngine { _ ->
             respond(

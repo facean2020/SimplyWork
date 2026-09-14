@@ -3,8 +3,8 @@ package com.yangz3720.simplywork.ui.agent
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -31,32 +31,31 @@ import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
 
-/** 面板高度上限（内容少时按内容收紧）。 */
-private val PREVIEW_MAX_HEIGHT = 560.dp
-
-/** 正文区上限：头 + 正文 + 内边距之和始终小于 [PREVIEW_MAX_HEIGHT]，正文自己滚。 */
-private val PREVIEW_BODY_MAX_HEIGHT = 400.dp
-
 /**
  * 文件预览页（v1.5）：Markdown 渲染 / 纯文本等宽 / 明说"不支持"。
  *
  * 两个入口共用这一个页面：会话底部的「新增文件」卡片，和文件管理器里的文件行 ——
  * 所以"从哪进来"不影响看到什么。
  *
+ * v1.1：允许**上拉成整页**。原先 `skipPartiallyExpanded = true` 且内容高度写死
+ * （560dp / 正文 400dp），所以面板“展开”也只有半个屏幕 —— 读文档时等于永远读一个小窗。
+ * 现在初始停在半开态，往上拉就铺满整屏：内容 `fillMaxHeight()`、正文 `weight(1f)`，
+ * 展开时正文自然占满剩余空间。
+ *
  * 正文用 [verticalScroll] 而不是列表：Markdown 渲染器自身是普通 Column，套惰性列表
- * 只会得到同向嵌套滚动（崩）。上限写死，滚的是正文本身。
+ * 只会得到同向嵌套滚动（崩）。滚的是正文本身，而它现在有多高就滚多高。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FilePreviewSheet(preview: FilePreview, onDismiss: () -> Unit) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(max = PREVIEW_MAX_HEIGHT)
+                .fillMaxHeight()
                 .imePadding()
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 24.dp)
@@ -85,7 +84,7 @@ fun FilePreviewSheet(preview: FilePreview, onDismiss: () -> Unit) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = PREVIEW_BODY_MAX_HEIGHT)
+                    .weight(1f)
                     .verticalScroll(rememberScrollState())
             ) {
                 val text = preview.text

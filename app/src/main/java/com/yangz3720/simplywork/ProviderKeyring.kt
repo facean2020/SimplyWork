@@ -17,7 +17,19 @@ data class KeyringState(
     val accounts: List<ProviderAccount> = ModelProviderPresets.ALL,
     val activeId: String? = null,
     val activeModel: String = "",
-    val timeoutMs: Long = 60_000L
+    val timeoutMs: Long = 60_000L,
+    /**
+     * v1.1：非删除类调用自动批准（用户定调"只有高危操作才手动批准"）。产品默认**开启**；
+     * 删除类（`RegisteredTool.destructive`）不受它影响，永远弹窗。
+     */
+    val autoApproveNonDestructive: Boolean = true,
+    /**
+     * v1.1：服务商在 /models 里报过的模型上下文长度，键为 [KeyringLogic.contextKey]。
+     * 只写真实正数 —— 记一个 0 或猜测值会让"未知"和"已知"再也分不开。
+     */
+    val modelContextTokens: Map<String, Int> = emptyMap(),
+    /** v1.1：上下文预算的手动覆盖；null = 自动推导（见 `ContextBudget.resolve`）。 */
+    val contextBudgetOverride: Int? = null
 )
 
 /**
@@ -80,6 +92,30 @@ object KeyringLogic {
 
     fun withTimeout(state: KeyringState, timeoutMs: Long): KeyringState =
         state.copy(timeoutMs = timeoutMs.coerceAtLeast(1_000L))
+
+    /** v1.1：非删除类调用是否自动批准。 */
+    fun withAutoApprove(state: KeyringState, enabled: Boolean): KeyringState =
+        state.copy(autoApproveNonDestructive = enabled)
+
+    /**
+     * v1.1：批量记录服务商报来的上下文长度。一次落盘 + 一次版本自增，而不是每个模型一次 ——
+     * 否则"拉一次模型列表"会把运行时重建触发几十次。非正数一律丢弃（见 [KeyringState]）。
+     */
+    fun withModelContexts(state: KeyringState, learned: Map<String, Int>): KeyringState {
+        val usable = learned.filterValues { it > 0 }
+        if (usable.isEmpty()) return state
+        return state.copy(modelContextTokens = state.modelContextTokens + usable)
+    }
+
+    /** v1.1：手动指定上下文预算；null 或非正数 = 回到自动推导。 */
+    fun withContextBudgetOverride(state: KeyringState, tokens: Int?): KeyringState =
+        state.copy(contextBudgetOverride = tokens?.takeIf { it > 0 })
+
+    /**
+     * 模型上下文的缓存键。**必须带 provider**：同名模型在不同端点的规格可能不同
+     * （同一个 `gpt-4o` 走官方与走第三方中转，上下文未必一致）。
+     */
+    fun contextKey(accountId: String, modelId: String): String = "$accountId/$modelId"
 
     fun activeAccount(state: KeyringState): ProviderAccount? =
         state.accounts.firstOrNull { it.id == state.activeId }

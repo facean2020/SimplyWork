@@ -3,6 +3,7 @@ package com.yangz3720.simplywork.ui.agent
 import com.yangz3720.simplywork.core.cloud.CloudFolder
 import com.yangz3720.simplywork.core.cloud.OneDriveAccount
 import com.yangz3720.simplywork.core.cloud.SyncState
+import com.yangz3720.simplywork.core.agent.ContextBudgetPlan
 import com.yangz3720.simplywork.core.session.Project
 import com.yangz3720.simplywork.core.session.ProjectLogic
 import com.yangz3720.simplywork.core.session.SessionRecord
@@ -129,6 +130,22 @@ data class AgentUiState(
      * 只含此刻仍存在的文件 —— 后来被删掉/移走的不会留在卡片里。
      */
     val newFiles: List<FileChange> = emptyList(),
+
+    /**
+     * v1.1：非删除类调用自动批准（用户开关）。删除类调用不受它影响，永远弹窗。
+     */
+    val autoApproveNonDestructive: Boolean = true,
+
+    /**
+     * v1.1：当前模型的上下文预算 + 它从哪来（设置页如实展示，见 `ContextBudgetPlan`）。
+     */
+    val contextBudget: ContextBudgetPlan? = null,
+
+    /**
+     * v1.1：最近一轮请求真正送进去的上下文 token 数（= 模型返回的 promptTokens）。
+     * 它才是"当前上下文用量"，累计值只会单调增长、看不出该不该压缩。
+     */
+    val contextPromptTokens: Int = 0,
 
     val modelConfigured: Boolean = true
 )
