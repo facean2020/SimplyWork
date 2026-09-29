@@ -3,10 +3,10 @@ package com.yangz3720.simplywork.ui.agent
 import android.app.Activity
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.yangz3720.simplywork.core.AgentRunSupervisor
 import com.yangz3720.simplywork.core.AgentRuntime
 import com.yangz3720.simplywork.core.agent.AgentStepEvent
 import com.yangz3720.simplywork.core.agent.ContextBudgetPlan
-import com.yangz3720.simplywork.core.agent.IncomingMessage
 import com.yangz3720.simplywork.core.cloud.CloudFolder
 import com.yangz3720.simplywork.core.cloud.OneDriveOwner
 import com.yangz3720.simplywork.core.session.ProjectLogic
@@ -17,10 +17,8 @@ import com.yangz3720.simplywork.core.workspace.FileChangeKind
 import com.yangz3720.simplywork.core.workspace.FileKinds
 import com.yangz3720.simplywork.core.workspace.ProjectFilesOwner
 import com.yangz3720.simplywork.infrastructure.model.config.ProviderAccount
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -91,6 +89,11 @@ interface AgentRuntimeOwner {
  */
 class AgentViewModel(
     private val owner: AgentRuntimeOwner,
+    /**
+     * 运行驱动（v1.6）：run 的持有者是进程级的 supervisor，不再是本 VM 的 viewModelScope。
+     * Activity 销毁/退到后台后 run 继续跑（前台服务把进程钉在前台），本 VM 退化成订阅者。
+     */
+    private val runSupervisor: AgentRunSupervisor,
     val approvalCoordinator: ApprovalCoordinator,
     /** Must be the same instance the AppContainer wired into the executor — a private copy
      * would leave every permission request hanging until the router timeout. */
@@ -127,14 +130,32 @@ class AgentViewModel(
     /** 挂起的运行时权限请求（v1.2）；非空时 UI 触发系统授权弹窗。 */
     val permission = permissionCoordinator.pending
 
-    private var runJob: Job? = null
-
     init {
         viewModelScope.launch(ioDispatcher) {
             val sessions = sessionsForCurrentProject(repository()?.listSessions().orEmpty())
             _uiState.update { it.copy(sessions = sessions) }
-            // 打开最近一个会话；没有会话则停留在"新对话"空态。
-            sessions.firstOrNull()?.id?.let { openSession(it) }
+            // 正在执行的 run 优先接管：从通知点回来 / Activity 重建时，界面必须落在执行中的
+            // 那个会话上，而不是"最近一个会话"。这条路径**不能**走 openSession —— 那会顺手
+            // 把 run 停掉（见 openSession 的语义）。
+            val running = runSupervisor.state.value
+            val target = running.sessionId?.takeIf { id -> sessions.any { it.id == id } }
+                ?: sessions.firstOrNull()?.id
+            if (target != null) {
+                if (running.running) switchToSession(target) else openSession(target)
+            }
+        }
+        // v1.6：running/iteration 只在 supervisor 里维护一处 —— run 可能在本 VM 诞生之前
+        // 就开始了（Activity 重建），也可能在本 VM 销毁之后继续。UI 侧所有"运行中拒绝"
+        // 门禁读的仍是 uiState.running，只是它的来源变成了这里。
+        viewModelScope.launch(ioDispatcher) {
+            runSupervisor.state.collect { run ->
+                _uiState.update { it.copy(running = run.running, iteration = run.iteration) }
+            }
+        }
+        // 循环事件的投影（会话重投影 / 待办 / 会话列表）留在 UI 侧：事实都在 repository 里，
+        // 事件只决定"什么时候重新读"。
+        viewModelScope.launch(ioDispatcher) {
+            runSupervisor.events.collect { onEvent(it) }
         }
         // v1.3：agent 经 self_config_update 自改配置 → 空闲时落地重建（run 内不重建，
         // 否则会换掉运行中的 coordinator；变更对下一轮 run 生效，工具结果里已声明）。
@@ -173,7 +194,7 @@ class AgentViewModel(
 
     /** ChatGPT 式新对话：清空当前投影；会话在首条消息发送时才落库（归属当前项目）。 */
     fun startNewChat() {
-        runJob?.cancel()
+        runSupervisor.stop()
         // 用 copy 而不是重建：只清会话投影，服务商/项目/OneDrive 等横向状态全部保留
         // （重建式的写法会在新增状态字段时静默丢字段）。
         _uiState.update { current ->
@@ -439,10 +460,16 @@ class AgentViewModel(
         }
     }
 
+    /** 切换会话：中止当前 run（原语义 —— 换会话 = 放弃这次执行）并重投影。 */
     fun openSession(sessionId: String) {
         if (_uiState.value.currentSessionId == sessionId) return
-        runJob?.cancel()
-        _uiState.update { it.copy(currentSessionId = sessionId, running = false, runError = null) }
+        runSupervisor.stop()
+        switchToSession(sessionId)
+    }
+
+    /** 只切投影、不动 run：[openSession] 的接管路径（Activity 重建后回到执行中的会话）。 */
+    private fun switchToSession(sessionId: String) {
+        _uiState.update { it.copy(currentSessionId = sessionId, runError = null) }
         viewModelScope.launch(ioDispatcher) {
             refreshConversation()
             refreshTodos()
@@ -485,12 +512,12 @@ class AgentViewModel(
         if (trimmed.isEmpty()) return
         val state = _uiState.value
         if (state.running) {
-            owner.current()?.queue?.enqueue(IncomingMessage.Steer(trimmed))
+            runSupervisor.steer(trimmed)
             return
         }
         viewModelScope.launch(ioDispatcher) {
             val sessionId = state.currentSessionId ?: createSessionFor(trimmed)
-            launchRun(sessionId, trimmed)
+            startRun(sessionId, trimmed)
         }
     }
 
@@ -499,7 +526,7 @@ class AgentViewModel(
         val state = _uiState.value
         val sessionId = state.currentSessionId ?: return
         if (state.running) return
-        viewModelScope.launch(ioDispatcher) { launchRun(sessionId, initialPrompt = null) }
+        startRun(sessionId, initialPrompt = null)
     }
 
     /**
@@ -519,7 +546,7 @@ class AgentViewModel(
                 repository.listNodes(sessionId).firstOrNull { it.id == messageId }
             } ?: return@launch
             repository.appendUserPrompt(sessionId, node.parentId, trimmed)
-            launchRun(sessionId, initialPrompt = null)
+            startRun(sessionId, initialPrompt = null)
         }
     }
 
@@ -544,7 +571,7 @@ class AgentViewModel(
 
     /** 运行中止（对齐 ChatGPT 的停止语义）：已落库节点保留，pending 节点由下次 run 清扫。 */
     fun stopRun() {
-        runJob?.cancel()
+        runSupervisor.stop()
     }
 
     fun respondApproval(allowed: Boolean) {
@@ -644,29 +671,23 @@ class AgentViewModel(
         return record.id
     }
 
-    private fun launchRun(sessionId: String, initialPrompt: String?) {
-        val runtime = owner.current() ?: run {
+    /**
+     * 启动一轮 run。驱动交给 [runSupervisor]（它自己拉前台服务保活），本 VM 只负责
+     * 前置校验与乐观的 UI 反馈；[AgentUiState.running] 的真实来源是 supervisor 的状态流。
+     */
+    private fun startRun(sessionId: String, initialPrompt: String?) {
+        if (owner.current() == null) {
             _uiState.update { it.copy(runError = "模型未配置，请先在设置中完成配置") }
             return
         }
-        runJob?.cancel()
         _uiState.update { it.copy(running = true, runError = null, iteration = 0) }
-        runJob = viewModelScope.launch(ioDispatcher) {
-            try {
-                runtime.coordinator.run(sessionId, initialPrompt).collect { event -> onEvent(event) }
-            } catch (e: CancellationException) {
-                _uiState.update { it.copy(running = false) }
-                throw e
-            } catch (e: Exception) {
-                _uiState.update { it.copy(running = false, runError = e.message ?: e::class.simpleName) }
-            }
-        }
+        runSupervisor.start(sessionId, initialPrompt)
     }
 
     private suspend fun onEvent(event: AgentStepEvent) {
         when (event) {
-            is AgentStepEvent.LoopStarted ->
-                _uiState.update { it.copy(running = true) }
+            // 运行中标记由 supervisor 的状态流维护（LoopStarted 时它已经是 true）。
+            is AgentStepEvent.LoopStarted -> Unit
 
             // 用户消息 / 转向落库即可见（不等下一轮 ModelTurn）。
             is AgentStepEvent.InboundPersisted -> refreshConversation()
@@ -674,9 +695,7 @@ class AgentViewModel(
             is AgentStepEvent.ModelTurn -> {
                 // promptTokens 就是这一轮真正送进去的上下文大小 —— 压缩与否看的就是它，
                 // 所以直接把它当作"当前上下文用量"透出给设置页。
-                _uiState.update {
-                    it.copy(iteration = event.iteration, contextPromptTokens = event.promptTokens)
-                }
+                _uiState.update { it.copy(contextPromptTokens = event.promptTokens) }
                 refreshConversation()
             }
 
@@ -701,7 +720,6 @@ class AgentViewModel(
                 // agent 可能在 run 内改过配置：落地待重建的变更（下一轮 run 生效）。
                 owner.rebuildRuntimeIfNeeded()
                 refreshSelection()
-                _uiState.update { it.copy(running = false) }
                 refreshConversation()
                 refreshTodos()
                 refreshSessions()
@@ -712,7 +730,7 @@ class AgentViewModel(
             is AgentStepEvent.Failed -> {
                 owner.rebuildRuntimeIfNeeded()
                 _uiState.update {
-                    it.copy(running = false, runError = event.cause.message ?: event.cause::class.simpleName)
+                    it.copy(runError = event.cause.message ?: event.cause::class.simpleName)
                 }
                 refreshConversation()
             }

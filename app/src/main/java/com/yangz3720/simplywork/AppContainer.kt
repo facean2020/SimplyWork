@@ -1,7 +1,9 @@
 package com.yangz3720.simplywork
 
 import android.content.Context
+import android.content.Intent
 import android.content.SharedPreferences
+import com.yangz3720.simplywork.core.AgentRunSupervisor
 import com.yangz3720.simplywork.core.AgentRuntime
 import com.yangz3720.simplywork.core.agent.AgentConfig
 import com.yangz3720.simplywork.core.agent.AuditApprovalHandler
@@ -26,6 +28,7 @@ import com.yangz3720.simplywork.infrastructure.systemops.SystemCapabilityProbeIm
 import com.yangz3720.simplywork.infrastructure.systemops.SystemOperationRouter
 import com.yangz3720.simplywork.infrastructure.systemops.SystemOperationRouterImpl
 import com.yangz3720.simplywork.infrastructure.systemops.intent.SystemIntentExecutorImpl
+import com.yangz3720.simplywork.service.AgentRunService
 import com.yangz3720.simplywork.ui.agent.AgentRuntimeOwner
 import com.yangz3720.simplywork.ui.agent.ApprovalCoordinator
 import com.yangz3720.simplywork.ui.agent.ModelSelection
@@ -33,7 +36,9 @@ import com.yangz3720.simplywork.ui.agent.PermissionCoordinator
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -166,6 +171,23 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
     }
 
     @Volatile private var runtime: AgentRuntime? = null
+
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * 运行驱动（v1.6）：run 的持有者从 `AgentViewModel.viewModelScope` 搬到这里。
+     * 之前 Activity 一销毁 run 就断，前台服务也就无从保活（服务活着、run 已经死了）；
+     * 现在驱动归进程，[AgentRunService] 只负责把进程钉在前台。
+     *
+     * [runtime] 走 lambda 而不是取值：配置变更会整体换掉 runtime 实例（[rebuildRuntime]），
+     * 每次 start 必须拿到当时最新的那个。
+     */
+    val runSupervisor = AgentRunSupervisor(
+        scope = appScope,
+        runtime = { runtime },
+        onRunStarted = { appContext.startForegroundService(Intent(appContext, AgentRunService::class.java)) },
+        onRunStopped = { appContext.stopService(Intent(appContext, AgentRunService::class.java)) }
+    )
 
     init {
         runtime = KeyringLogic.toModelConfig(keyring.state)?.let(::buildRuntime)

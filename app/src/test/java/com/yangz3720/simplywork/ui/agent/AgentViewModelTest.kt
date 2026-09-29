@@ -2,6 +2,7 @@ package com.yangz3720.simplywork.ui.agent
 
 import android.app.Activity
 import android.content.SharedPreferences
+import com.yangz3720.simplywork.core.AgentRunSupervisor
 import com.yangz3720.simplywork.core.AgentRuntime
 import com.yangz3720.simplywork.core.agent.tool.AgentSelfConfig
 import com.yangz3720.simplywork.core.agent.tool.SelfOpsTools
@@ -39,7 +40,9 @@ import com.yangz3720.simplywork.infrastructure.systemops.SystemOperationRouter
 import io.mockk.mockk
 import java.io.File
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.resetMain
@@ -256,17 +259,30 @@ class AgentViewModelTest {
     private fun files(changes: FileChangeLog = InMemoryFileChangeLog()): ProjectFilesOwner =
         LocalProjectFiles(workspace(), changes)
 
+    /**
+     * 运行驱动（v1.6）：真实 supervisor + 真实 Dispatchers.IO —— 用例断言的就是"驱动在 VM
+     * 之外也照跑"。前台服务的启停回调留空（Service 是 Android 组件，不进单测）。
+     */
+    private fun runSupervisor(owner: AgentRuntimeOwner): AgentRunSupervisor = AgentRunSupervisor(
+        scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+        runtime = { owner.current() }
+    )
+
     private fun viewModel(
         runtime: AgentRuntime,
         projectFiles: ProjectFilesOwner = files()
-    ): AgentViewModel = AgentViewModel(
-        FakeOwner(runtime),
-        ApprovalCoordinator(),
-        PermissionCoordinator(),
-        fakeProjects(),
-        FakeOneDrive(),
-        projectFiles
-    )
+    ): AgentViewModel {
+        val owner = FakeOwner(runtime)
+        return AgentViewModel(
+            owner,
+            runSupervisor(owner),
+            ApprovalCoordinator(),
+            PermissionCoordinator(),
+            fakeProjects(),
+            FakeOneDrive(),
+            projectFiles
+        )
+    }
 
     /** 真实时间轮询：等待谓词成立或超时。 */
     private fun waitFor(timeoutMs: Long = 8000, predicate: () -> Boolean) {
@@ -386,7 +402,7 @@ class AgentViewModelTest {
     @Test
     fun `selectModel applies selection through owner and updates state`() {
         val owner = FakeOwner(null)
-        val vm = AgentViewModel(owner, ApprovalCoordinator(), PermissionCoordinator(), fakeProjects(), FakeOneDrive(), files())
+        val vm = AgentViewModel(owner, runSupervisor(owner), ApprovalCoordinator(), PermissionCoordinator(), fakeProjects(), FakeOneDrive(), files())
         Thread.sleep(100) // init 完成后状态稳定
 
         vm.selectModel("deepseek", "  deepseek-chat  ")
@@ -399,7 +415,7 @@ class AgentViewModelTest {
     @Test
     fun `selectModel is rejected while running`() {
         val owner = FakeOwner(buildRuntime(HangingProvider()))
-        val vm = AgentViewModel(owner, ApprovalCoordinator(), PermissionCoordinator(), fakeProjects(), FakeOneDrive(), files())
+        val vm = AgentViewModel(owner, runSupervisor(owner), ApprovalCoordinator(), PermissionCoordinator(), fakeProjects(), FakeOneDrive(), files())
 
         vm.send("hi")
         waitFor { vm.uiState.value.running }
@@ -413,7 +429,7 @@ class AgentViewModelTest {
     @Test
     fun `fetchModels delegates to owner with account`() = kotlinx.coroutines.runBlocking {
         val owner = FakeOwner(null)
-        val vm = AgentViewModel(owner, ApprovalCoordinator(), PermissionCoordinator(), fakeProjects(), FakeOneDrive(), files())
+        val vm = AgentViewModel(owner, runSupervisor(owner), ApprovalCoordinator(), PermissionCoordinator(), fakeProjects(), FakeOneDrive(), files())
         val account = ProviderAccount(id = "openrouter", name = "OpenRouter", baseUrl = "https://openrouter.ai/api/v1")
 
         val result = vm.fetchModels(account)
@@ -498,8 +514,10 @@ class AgentViewModelTest {
             router = mockk<SystemOperationRouter>(relaxed = true),
             selfOps = { repo -> SelfOpsTools.registeredTools(repo, FakeSelfConfig(), ws, projects, log) }
         )
+        val owner = FakeOwner(runtime)
         val vm = AgentViewModel(
-            FakeOwner(runtime),
+            owner,
+            runSupervisor(owner),
             ApprovalCoordinator(),
             PermissionCoordinator(),
             projects,
