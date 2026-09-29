@@ -42,18 +42,19 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.yangz3720.simplywork.core.agent.ContextBudgetPlan
 import com.yangz3720.simplywork.infrastructure.model.config.ProviderAccount
+import kotlin.math.roundToInt
 
-/** 设置页的分页：首屏是索引，具体配置各进一层。 */
+/** Paging inside settings: the first screen is the index, and each concrete setting goes one level deeper. */
 private enum class SettingsPage { Index, Providers, Context }
 
 /**
- * 设置（v1.1）。
+ * Settings (v1.1).
  *
- * 首屏改成**条目索引**：以前一打开设置就是一张服务商密钥表单，把"看设置"变成"填 Key"，
- * 其余配置无处安放。现在索引只回答"这里能设什么"，具体动作进二级页。
+ * The first screen became an **entry index**: before, opening settings landed straight on a provider API-key form, turning "look at settings" into "fill in a Key",
+ * and every other setting had nowhere to live. Now the index only answers "what can be set here", and the concrete actions go to second-level pages.
  *
- * 返回键的层级：二级页先回索引，索引再退出设置 —— 直接从二级页退出会让"返回"跳一层，
- * 用户会以为设置页丢了。
+ * Levels of the back key: a second-level page returns to the index first, and the index exits settings -- exiting straight from a second-level page would make "back" skip a level,
+ * and the user would think the settings page had gone missing.
  */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
@@ -101,7 +102,7 @@ fun SettingsScreen(
     }
 }
 
-/** 首屏索引：只列"能设什么"，数值摘要放在副标题上。 */
+/** First-screen index: lists only "what can be set"; the value summary goes in the subtitle. */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsIndex(
@@ -123,11 +124,13 @@ private fun SettingsIndex(
         )
         SettingsEntry(
             title = "上下文窗口",
-            subtitle = contextBudget?.let { "预算 ${formatTokens(it.tokens)} · 本会话已用 ${formatTokens(contextPromptTokens)}" }
-                ?: "未选择模型",
+            subtitle = contextBudget?.let { budget ->
+                "预算 ${formatTokens(budget.tokens)} · 本会话已用 ${formatTokens(contextPromptTokens)}" +
+                    usedPercent(contextPromptTokens, budget.tokens).orEmpty()
+            } ?: "未选择模型",
             onClick = onOpenContext
         )
-        // 自动批准是二选一，就地开关比再进一层更快 —— 索引页也能一眼看到当前状态。
+        // Auto-approval is a two-way choice, so an inline switch is faster than another level -- and the index page shows the current state at a glance.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -147,7 +150,7 @@ private fun SettingsIndex(
     }
 }
 
-/** 服务商与密钥（原来的设置首屏）。 */
+/** Providers and API keys (the old first screen of settings). */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 private fun ProviderSettings(
@@ -197,10 +200,10 @@ private fun ProviderSettings(
 }
 
 /**
- * 上下文窗口。
+ * Context window.
  *
- * 用户不需要知道压缩算法，只需要知道两件事：**这个预算是多少**、**它在什么时候出手**。
- * 所以页面按"预算 → 来源 → 用量 → 手动指定"排，并在末尾用一句话说清压缩时机。
+ * The user does not need to know the compaction algorithm, only two things: **how big this budget is** and **when it kicks in**.
+ * So the page is ordered "budget -> source -> usage -> manual override", and one sentence at the end spells out the compaction timing.
  */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
@@ -234,11 +237,17 @@ private fun ContextSettings(
 
         InfoLine(
             label = "模型本身",
-            value = budget.modelContextTokens?.let { formatTokens(it) } ?: "未知（该服务商没报）"
+            value = budget.modelContextTokens?.let { formatTokens(it) }
+                ?: "未知（服务商没报，内置对照表里也没有）"
         )
         InfoLine(
             label = "本会话已用",
-            value = if (promptTokens > 0) formatTokens(promptTokens) else "还没有发送过消息"
+            value = if (promptTokens > 0) {
+                "${formatTokens(promptTokens)} / ${formatTokens(budget.tokens)}" +
+                    usedPercent(promptTokens, budget.tokens).orEmpty()
+            } else {
+                "还没有发送过消息"
+            }
         )
         InfoLine(label = "保留不压缩", value = formatTokens(budget.workingTokenBudget))
 
@@ -253,7 +262,7 @@ private fun ContextSettings(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
         )
-        // 「自动」与具体档位同排：手动值随时能一键退回自动，不用去别处找。
+        // "Auto" sits on the same row as the concrete tiers: a manual value can always be reverted to auto with one tap, with no hunting elsewhere.
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             BudgetChoiceRow(
                 options = listOf(null, 24_000, 64_000, 128_000),
@@ -276,7 +285,7 @@ private fun ContextSettings(
     }
 }
 
-/** 一排预算档位；`null` = 自动。 */
+/** One row of budget tiers; `null` = auto. */
 @Composable
 private fun BudgetChoiceRow(
     options: List<Int?>,
@@ -317,7 +326,7 @@ private fun InfoLine(label: String, value: String) {
     }
 }
 
-/** 二级页共用的外壳：标题 + 返回 + 一致的留白。 */
+/** Shell shared by the second-level pages: title + back + consistent padding. */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsScaffold(
@@ -351,7 +360,7 @@ private fun SettingsScaffold(
     }
 }
 
-/** 索引里的一行：标题 + 数值摘要 + 右箭头。 */
+/** One row in the index: title + value summary + right chevron. */
 @Composable
 private fun SettingsEntry(title: String, subtitle: String, onClick: () -> Unit) {
     Row(
@@ -380,12 +389,25 @@ private fun SettingsEntry(title: String, subtitle: String, onClick: () -> Unit) 
     }
 }
 
-/** 预算来源的说明文案（用户看不懂 `Provider` 这种枚举名）。 */
+/** Explanatory copy for the budget source (the user cannot read enum names like `Provider`). */
 private fun ContextBudgetPlan.Source.explain(): String = when (this) {
     ContextBudgetPlan.Source.Manual -> "由你手动指定"
     ContextBudgetPlan.Source.Provider -> "由服务商报告的模型上下文算出"
     ContextBudgetPlan.Source.ModelName -> "由模型名里的规格标记算出"
+    ContextBudgetPlan.Source.BuiltIn -> "由内置对照表算出（模型目录更新很快，表可能滞后；可用下方手动指定覆盖）"
     ContextBudgetPlan.Source.Default -> "模型上下文未知，按默认值"
+}
+
+/**
+ * The used amount as a share of the budget, shaped like `(6%)`; returns the empty string when no ratio can be computed.
+ *
+ * Like [formatTokens] it is an `internal` pure function -- it is used only in copy such as "used X / budget Y",
+ * and unit tests hit the copy directly, without starting Compose.
+ */
+internal fun usedPercent(promptTokens: Int, budgetTokens: Int): String {
+    if (promptTokens <= 0 || budgetTokens <= 0) return ""
+    val percent = (promptTokens * 100.0 / budgetTokens).roundToInt()
+    return "（$percent%）"
 }
 
 /** `200000` → `200k`，`499500` → `499.5k`，`2000000` → `2M`。 */
@@ -399,10 +421,10 @@ private fun trimNumber(value: Double): String =
     if (value == value.toLong().toDouble()) value.toLong().toString() else "%.1f".format(value)
 
 /**
- * 单个服务商的密钥卡片：名称 + 端点 + Key 输入与保存。
+ * One provider's key card: name + endpoint + Key input and save.
  *
- * v1.1：Key 默认**打码**。它原先以明文铺在设置首屏上 —— 截图、旁人一瞥、投屏都会漏。
- * 需要核对时点「显示」临时露出，而不是默认就一直摆着。
+ * v1.1: the Key is **masked** by default. It used to be laid out in plaintext on the first settings screen -- screenshots, a bystander's glance, or screen sharing would all leak it.
+ * When you need to verify it, tap "Show" to reveal it temporarily, instead of leaving it on display by default.
  */
 @Composable
 private fun ProviderKeyCard(
@@ -457,8 +479,8 @@ private fun ProviderKeyCard(
                     placeholder = { Text("API Key（sk-…）", style = MaterialTheme.typography.bodyMedium) },
                     modifier = Modifier.weight(1f)
                 )
-                // 用文字而不是眼睛图标：核心图标集里没有 visibility 字形，为它多引一套
-                // 图标依赖不值得（material-icons-extended 会让 APK 明显变大）。
+                // Text instead of an eye icon: the core icon set has no visibility glyph, and pulling in another
+                // icon dependency just for it is not worth it (material-icons-extended would visibly grow the APK).
                 TextButton(onClick = { revealed = !revealed }) {
                     Text(
                         text = if (revealed) "隐藏" else "显示",
@@ -478,7 +500,7 @@ private fun ProviderKeyCard(
     }
 }
 
-/** 自定义端点表单：名称 + Base URL + Key。 */
+/** Custom endpoint form: name + Base URL + Key. */
 @Composable
 private fun CustomAccountForm(
     onAdd: (name: String, baseUrl: String, apiKey: String) -> Unit,

@@ -17,8 +17,8 @@
     <!-- Sideloading distribution: skip per-<queries> package-visibility whack-a-mole for
          resolveActivity / getLaunchIntentForPackage against arbitrary targets. -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
-    <!-- v1.6：Agent 任务在前台服务上执行（AgentRunService）。FGS 本体权限 + specialUse 类型权限，
-         两者都是 normal 权限，install 时授予。specialUse 自 API 34 起可用，与本工程 minSdk 一致。 -->
+    <!-- v1.6: Agent tasks execute on a foreground service (AgentRunService). The FGS permission proper + the specialUse type permission,
+         both are normal permissions, granted at install time. specialUse has been available since API 34, same as this project's minSdk. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- sys_device_read (v1.2): ConnectivityManager.getActiveNetwork / getNetworkCapabilities.
@@ -72,11 +72,11 @@
             </intent-filter>
         </activity>
 
-        <!-- v1.6：Agent 任务执行的前台服务。只做保活 + 通知投影，不执行任何逻辑
-             （run 由进程级 AgentRunSupervisor 驱动，见 core/AgentRunSupervisor.kt）。
-             specialUse：任务执行不属于 dataSync/mediaPlayback 等既有类型，按平台要求
-             用 specialUse 并在 property 里声明具体用途（Play 上架需填同一说明；
-             本工程是 sideload 分发，声明本身无副作用）。 -->
+        <!-- v1.6: the foreground service that runs Agent tasks. It only keeps things alive + projects the notification, executes no logic
+             (the run is driven by the process-level AgentRunSupervisor, see core/AgentRunSupervisor.kt).
+             specialUse: task execution isn't one of the existing types like dataSync/mediaPlayback, so per platform requirements
+             we use specialUse and declare the concrete purpose in a property (Play submissions must state the same thing;
+             this project ships via sideload, so the declaration itself has no side effect). -->
         <service
             android:name=".service.AgentRunService"
             android:exported="false"

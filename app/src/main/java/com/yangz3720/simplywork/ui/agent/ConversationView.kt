@@ -55,8 +55,8 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 
 /**
- * 消息流（签名元素）：工具活动时间线 —— 调用/结果渲染为带状态点的左侧活动条目，
- * 助手正文无气泡纯排版，用户消息保留右对齐气泡形成方向对比。
+ * Message stream (the signature element): a tool activity timeline -- calls/results render as left-side activity entries carrying a status dot,
+ * assistant body text has no bubble and is pure typography, and user messages keep a right-aligned bubble to create a directional contrast.
  */
 @Composable
 fun ConversationList(
@@ -68,7 +68,7 @@ fun ConversationList(
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
     val expanded = remember { mutableStateMapOf<String, Boolean>() }
 
-    // 新内容到达时贴底滚动。
+    // Stick to the bottom and scroll when new content arrives.
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
     }
@@ -113,7 +113,7 @@ private fun MessageItem(
     }
 }
 
-// ----- 用户：右对齐气泡（长按编辑 · 分支切换） -----
+// ----- User: right-aligned bubble (long-press to edit / branch switching) -----
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -143,7 +143,7 @@ private fun UserBubble(
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
             )
         }
-        // 分支导航（VSCode-Copilot 式）：编辑重发后同位置出现多个提问分支。
+        // Branch navigation (VSCode-Copilot style): after an edit-and-resend, several prompt branches appear at the same position.
         if (message.branchCount > 1) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconButton(
@@ -180,11 +180,11 @@ private fun UserBubble(
     }
 }
 
-// ----- 助手：无气泡纯排版（Markdown 渲染） -----
+// ----- Assistant: no bubble, pure typography (Markdown rendering) -----
 
 /**
- * 标题字号：库默认把 h1..h6 映射到 displayLarge/Medium/Small（手机上 36~57sp，过大）。
- * 这里压到适合聊天的梯度，仍保留大中小可辨（正文 bodyLarge=16sp）。
+ * Heading font sizes: the library maps h1..h6 to displayLarge/Medium/Small by default (36-57sp on a phone, too large).
+ * Here they are pressed down to a gradient suited to chat, while still keeping large/medium/small distinguishable (body text is bodyLarge=16sp).
  */
 private fun chatHeading(base: TextStyle, size: androidx.compose.ui.unit.TextUnit): TextStyle =
     base.copy(fontSize = size, fontWeight = FontWeight.Bold)
@@ -192,7 +192,7 @@ private fun chatHeading(base: TextStyle, size: androidx.compose.ui.unit.TextUnit
 @Composable
 private fun AssistantText(message: UiMessage) {
     if (message.isError) {
-        // 业务错误保持纯文本 + 错误色。
+        // A business error stays plain text + error color.
         Text(
             text = message.text,
             style = MaterialTheme.typography.bodyLarge,
@@ -216,7 +216,7 @@ private fun AssistantText(message: UiMessage) {
                 .fillMaxWidth()
                 .padding(horizontal = 2.dp, vertical = 2.dp)
         ) {
-            // Markdown 渲染（mikepenz multiplatform-markdown-renderer，M3 主题对齐）。
+            // Markdown rendering (mikepenz multiplatform-markdown-renderer, aligned with the M3 theme).
             Markdown(
                 content = message.text,
                 colors = markdownColor(text = MaterialTheme.colorScheme.onBackground),
@@ -233,7 +233,7 @@ private fun AssistantText(message: UiMessage) {
                 modifier = Modifier.fillMaxWidth()
             )
             Spacer(Modifier.size(2.dp))
-            // 复制整条回复（无图标依赖：material-icons-core 不含 ContentCopy）。
+            // Copy the whole reply (no icon dependency: material-icons-core does not include ContentCopy).
             Text(
                 text = if (copied) "已复制" else "复制",
                 style = MaterialTheme.typography.labelMedium,
@@ -251,7 +251,7 @@ private fun AssistantText(message: UiMessage) {
     }
 }
 
-// ----- 工具活动时间线条目（签名元素） -----
+// ----- Tool activity timeline entry (the signature element) -----
 
 @Composable
 private fun ToolActivityItem(message: UiMessage, expanded: Boolean, onToggleExpand: () -> Unit) {
@@ -264,7 +264,7 @@ private fun ToolActivityItem(message: UiMessage, expanded: Boolean, onToggleExpa
                 .then(if (hasDetail) Modifier.clickable { onToggleExpand() } else Modifier)
                 .padding(vertical = 2.dp)
         ) {
-            // 状态点：进行中（空心）/ 完成（墨青）/ 失败（赭红）
+            // Status dot: in progress (hollow) / done (ink cyan) / failed (ochre red)
             Box(
                 modifier = Modifier
                     .size(8.dp)
@@ -343,8 +343,8 @@ private fun ToolActivityItem(message: UiMessage, expanded: Boolean, onToggleExpa
                 }
             }
         }
-        // v1.5：这次调用对文件做了什么（Codex 式 diff 卡片）。与"结果"展开项不同层级：
-        // 结果回答"工具说了什么"，卡片回答"文件现在变成什么样"。
+        // v1.5: what this call did to files (a Codex-style diff card). A different layer from the expandable "result":
+        // the result answers "what the tool said", the card answers "what the file looks like now".
         message.fileChange?.let { change ->
             Spacer(Modifier.size(6.dp))
             Column(modifier = Modifier.padding(start = 18.dp)) { ToolChangeCard(change) }
@@ -352,7 +352,7 @@ private fun ToolActivityItem(message: UiMessage, expanded: Boolean, onToggleExpa
     }
 }
 
-// ----- 转向 / 守卫跟进：居中小条 -----
+// ----- Steer / guard follow-up: a small centered pill -----
 
 @Composable
 private fun CenterPill(prefix: String, text: String) {
@@ -376,7 +376,7 @@ private fun CenterPill(prefix: String, text: String) {
     }
 }
 
-// ----- 摘要（Episode 压缩产物） -----
+// ----- Summary (the product of Episode compaction) -----
 
 @Composable
 private fun SummaryItem(message: UiMessage) {

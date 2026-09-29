@@ -30,12 +30,14 @@ class AuditGatePipeline(
     private val sanitizer: ToolResultSanitizer = ToolResultSanitizer.Identity,
     private val maxToolResultChars: Int = 8_000,
     /**
-     * 自动批准（v1.1，来自 [AgentConfig]）：默认每次 USER_CONFIRMING 都问人；开启后只有
-     * **不可逆**的调用（[RegisteredTool.destructive]）才问 —— 读位置、查日历、拉起应用
-     * 每次都确认只是摩擦，而删文件必须留下人的一拍。
+     * Auto-approval (v1.1, comes from [AgentConfig]): by default every USER_CONFIRMING call asks the
+     * human; once enabled, only **irreversible** calls ([RegisteredTool.destructive]) ask -- confirming
+     * every location read, calendar query or app launch is pure friction, whereas deleting a file must
+     * leave the human a beat.
      *
-     * 默认 false：这是最保守的一侧，且保持与旧行为一致（单元测试的既有预期不受影响）。
-     * 产品层的默认值由 `KeyringState` 决定。
+     * Default false: this is the most conservative side, and it keeps behaviour identical to before
+     * (existing unit-test expectations are unaffected). The product layer's default is decided by
+     * `KeyringState`.
      */
     private val autoApproveNonDestructive: Boolean = false
 ) {
@@ -71,10 +73,11 @@ class AuditGatePipeline(
     }
 
     /**
-     * 是否需要弹窗问人。
+     * Whether a dialog has to ask the human.
      *
-     * 自动批准只对"非不可逆"的 USER_CONFIRMING 调用生效：删除类与开关无关，永远走
-     * [approvalHandler] —— 一个能被设置关掉的删除确认等于没有确认。
+     * Auto-approval applies only to "non-irreversible" USER_CONFIRMING calls: delete-style ones are
+     * indifferent to the switch and always go through [approvalHandler] -- a delete confirmation a
+     * setting can turn off is no confirmation at all.
      */
     private fun requiresUserApproval(tool: RegisteredTool, level: DangerLevel): Boolean = when {
         level != DangerLevel.USER_CONFIRMING -> false
@@ -86,7 +89,7 @@ class AuditGatePipeline(
      * Flow node Q: normalized tool-result JSON → final model-facing content
      * (sanitize → truncate with an explicit marker).
      *
-     * Truncation is JSON-aware (v1.2 复核 S6): a byte-cut of a serialized object yields
+     * Truncation is JSON-aware (v1.2 review S6): a byte-cut of a serialized object yields
      * invalid JSON, which the model then tries to parse — a busy calendar or app list comes
      * back as a syntax error instead of a partial answer. When the (sanitized) payload still
      * parses, we shrink it structurally; only text the sanitizer has mangled beyond

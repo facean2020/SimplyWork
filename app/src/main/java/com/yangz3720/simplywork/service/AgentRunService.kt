@@ -26,24 +26,24 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 /**
- * Agent 任务的前台服务（v1.6，`specialUse` 类型）。
+ * Foreground service for Agent tasks (v1.6, `specialUse` type).
  *
- * **它不执行任何东西** —— run 由进程级的 [com.yangz3720.simplywork.core.AgentRunSupervisor]
- * 驱动。这个服务只做两件事：
- *  1. `startForeground` 把进程钉在前台，使 run 在锁屏/退到后台/Activity 销毁后不被回收；
- *  2. 把运行状态投影成一条通知（含"停止"与"返回处理"动作）。
+ * **It executes nothing** -- the run is driven by the process-level
+ * [com.yangz3720.simplywork.core.AgentRunSupervisor]. This service does only two things:
+ *  1. `startForeground` pins the process to the foreground so the run is not reclaimed after the screen locks, the app goes to the background, or the Activity is destroyed;
+ *  2. projects the run state into a single notification (with "stop" and "return to handling" actions).
  *
- * 之所以不把执行放进服务：Service 是 Android 组件、单测跑不了，一旦执行逻辑进来，
- * 主干就再也没法在 JVM 上验证了。边界守在这里，两侧各自可测。
+ * Why execution is not put inside the service: a Service is an Android component and cannot be unit-tested, and once execution logic comes in,
+ * the mainline can never be verified on the JVM again. The boundary is guarded here, so both sides stay testable on their own.
  *
- * 生命周期由 supervisor 的启停回调驱动（AppContainer 注入）：run 开始 → startForegroundService，
- * run 结束 → stopService。
+ * The lifecycle is driven by the supervisor's start/stop callbacks (injected by AppContainer): run starts -> startForegroundService,
+ * run ends -> stopService.
  */
 class AgentRunService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
-    /** `onStartCommand` 每次 start 都会被调用，收集器只挂一次。 */
+    /** `onStartCommand` is called on every start; the collector is attached only once. */
     private var observing = false
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -54,7 +54,7 @@ class AgentRunService : Service() {
             return START_NOT_STICKY
         }
 
-        // 必须在 5s 内进前台：先用当前状态同步挂一条，之后交给收集器刷新。
+        // Must reach the foreground within 5s: first post one synchronously with the current state, then hand off to the collector to refresh.
         ServiceCompat.startForeground(
             this,
             NOTIFICATION_ID,
@@ -85,12 +85,12 @@ class AgentRunService : Service() {
         super.onDestroy()
     }
 
-    /** 不对外暴露 binder：状态走 supervisor 的 StateFlow，不需要跨进程/组件绑定。 */
+    /** No binder is exposed: state travels through the supervisor's StateFlow, so cross-process/component binding is unnecessary. */
     override fun onBind(intent: Intent?): IBinder? = null
 
     /**
-     * 通知正文的三种形态。运行中撞上 HITL 是这套机制唯一的"坑"：审批/授权都挂起等 UI，
-     * 后台没人点就永远等下去，所以这两种状态必须显式说出来（并让整条通知可点回界面）。
+     * The three shapes of the notification body. Hitting a HITL during a run is the only "pit" in this mechanism: approval and authorization both suspend waiting for the UI,
+     * and with nobody in the background to tap them they wait forever, so these two states must be stated explicitly (and the whole notification must be tappable back to the UI).
      */
     private fun noticeOf(run: RunState, permission: PermissionRequest?, approval: ApprovalRequest?): String = when {
         permission != null -> "需要授权：${permission.permissions.first().substringAfterLast('.')}"
@@ -129,8 +129,8 @@ class AgentRunService : Service() {
     }
 
     /**
-     * IMPORTANCE_LOW（不出声、不横幅）：这是常驻的过程指示，不是提醒。因此"等待你的确认"
-     * 也不会响铃 —— 是否要为需人工介入的状态另开一条高优先级通道，属于产品决策，默认取保守值。
+     * IMPORTANCE_LOW (no sound, no heads-up banner): this is a persistent process indicator, not an alert. That is why "waiting for your confirmation"
+     * does not ring either -- whether to open a separate high-priority channel for states needing human intervention is a product decision, and the default takes the conservative value.
      */
     private fun ensureChannel() {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager

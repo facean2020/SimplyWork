@@ -10,17 +10,18 @@ import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 
 /**
- * 项目 → OneDrive 文件夹的绑定（v1.4）。绑定的是**文件夹**（driveItem id），
- * 不是文件：项目的沙箱目录整棵镜像到该文件夹。
+ * Project -> OneDrive folder binding (v1.4). What is bound is a **folder** (a driveItem id),
+ * not a file: the project's sandbox directory is mirrored into that folder as a whole tree.
  *
- * [deltaLink] 是 Graph 增量游标：有它之后每次同步只拉"此后"的变化，配合
- * [lastSyncedAt] 构成懒惰同步（不做轮询/后台任务）。它随每次同步推进。
+ * [deltaLink] is the Graph incremental cursor: with it in hand, each sync only pulls what changed
+ * "after that point", and together with [lastSyncedAt] it makes up lazy sync (no polling, no
+ * background tasks). It advances with every sync.
  */
 @Serializable
 data class OneDriveBinding(
-    /** 云端文件夹的 driveItem id（同步主键，绝不存路径：重命名/移动会换路径）。 */
+    /** The cloud folder's driveItem id (the sync primary key; never store a path, since renames/moves change it). */
     val folderId: String,
-    /** 展示用文件夹名（含父级路径，如 `工作/项目A`）。 */
+    /** The folder name for display (including its parent path, e.g. `Work/ProjectA`). */
     val folderPath: String,
     val deltaLink: String? = null,
     val lastSyncedAt: Long = 0L,
@@ -28,16 +29,19 @@ data class OneDriveBinding(
 )
 
 /**
- * 「项目」（v1.3，参考 Qwen Studio / GPT 建档语义，用户定调"会话归属项目"）：
- * 一个项目 = 一份档案 = 会话归属单位 + 沙箱工作空间目录
- * （`filesDir/agent_workspace/projects/<projectId>/`，由 [com.yangz3720.simplywork.core.workspace.AgentWorkspace] 管理）。
+ * A "project" (v1.3, following Qwen Studio / GPT project-filing semantics, the user's framing
+ * being "sessions belong to a project"):
+ * one project = one filing unit = the unit of session ownership + a sandbox workspace directory
+ * (`filesDir/agent_workspace/projects/<projectId>/`, managed by [com.yangz3720.simplywork.core.workspace.AgentWorkspace]).
  *
- * 项目数量小（个位数到几十），用 SharedPreferences JSON 整体读写即可；
- * 会话归属在 `sessions.project_id` 列（SqliteSessionStore v2）。旧会话行的
- * `project_id = NULL` 由 [DEFAULT_PROJECT_ID] 语义兜底，不回填。
+ * The number of projects is small (single digits to a few dozen), so reading and writing the
+ * whole SharedPreferences JSON blob is good enough; session ownership lives in the
+ * `sessions.project_id` column (SqliteSessionStore v2). Old session rows with
+ * `project_id = NULL` are the [DEFAULT_PROJECT_ID] semantic fallback and are not backfilled.
  *
- * [oneDrive] 为 null = 未绑定云端（v1.4）。新增字段带默认值，旧 JSON 直接解码；
- * 快照/序列化该结构时不泄露令牌——令牌只在 MSAL 自己的缓存里。
+ * [oneDrive] being null = no cloud binding (v1.4). New fields carry default values, so old JSON
+ * decodes as is; snapshotting/serialising this structure never leaks a token -- tokens live only
+ * in MSAL's own cache.
  */
 @Serializable
 data class Project(
@@ -47,17 +51,17 @@ data class Project(
     val oneDrive: OneDriveBinding? = null
 )
 
-/** 纯逻辑（唯一裁决点，JVM 可测）：名字校验、去重、默认项目。 */
+/** Pure logic (the single arbitration point, JVM-testable): name validation, dedup, default project. */
 object ProjectLogic {
 
-    /** 稳定 id 的默认项目：承接全部 pre-v1.3 会话（projectId == null）。 */
+    /** The default project with a stable id: it takes over every pre-v1.3 session (projectId == null). */
     const val DEFAULT_PROJECT_ID = "default"
     const val DEFAULT_PROJECT_NAME = "默认项目"
 
     const val MAX_NAME_LENGTH = 48
     val ID_REGEX = Regex("^[A-Za-z0-9_-]{1,64}$")
 
-    /** @return 校验后的名字，或错误消息（模型可据此自纠，P2 显式失败）。 */
+    /** @return the validated name, or the error message (the model can self-correct from it; P2 explicit failure). */
     fun validateName(raw: String): String? = when {
         raw.isBlank() -> "project name must not be blank"
         raw.length > MAX_NAME_LENGTH -> "project name must be at most $MAX_NAME_LENGTH characters (got ${raw.length})"
@@ -67,8 +71,9 @@ object ProjectLogic {
     fun create(projects: List<Project>, rawName: String, nowMs: Long): Result<Project> {
         validateName(rawName)?.let { return Result.failure(IllegalArgumentException(it)) }
         val name = rawName.trim()
-        // 名字大小写不敏感去重：同名建档是模型的常见失误，显式拒绝而不是造出
-        // 两个只差大小写的目录，让用户在切换器里猜哪个是哪个。
+        // Case-insensitive name dedup: creating a project with a duplicate name is a common slip
+        // by the model, so reject it explicitly instead of producing two directories that differ
+        // only in case and making the user guess in the switcher which one is which.
         projects.firstOrNull { it.name.equals(rawName.trim(), ignoreCase = true) }?.let {
             return Result.failure(IllegalArgumentException("project '${it.name}' already exists (${it.id})"))
         }
@@ -81,11 +86,13 @@ object ProjectLogic {
 }
 
 /**
- * 项目注册表：项目列表 + 当前项目指针。整体 JSON 存 `SharedPreferences`（与
- * [com.yangz3720.simplywork.ui.agent.ProviderKeyring] 同一持久化惯例）；并发只允许
- * 单进程 UI/agent 循环访问，不加锁（与 keyring 一致）。
+ * The project registry: the project list + the current-project pointer. The JSON goes into
+ * `SharedPreferences` as one blob (the same persistence convention as
+ * [com.yangz3720.simplywork.ui.agent.ProviderKeyring]); concurrency is limited to the single
+ * process's UI/agent loop, so there is no locking (consistent with keyring).
  *
- * [changes] 供 UI 层观察刷新（切项目 = 会话列表过滤条件变了）。
+ * [changes] exists for the UI layer to observe and refresh on (switching projects changes the
+ * session list's filter).
  */
 class ProjectStore(private val prefs: SharedPreferences) {
 
@@ -93,7 +100,7 @@ class ProjectStore(private val prefs: SharedPreferences) {
 
     private val _changes = MutableStateFlow(0)
 
-    /** 每次项目/当前项目变更自增；UI 据此刷新会话列表。 */
+    /** Incremented on every project / current-project change; the UI refreshes the session list from it. */
     val changes: StateFlow<Int> = _changes.asStateFlow()
 
     init {
@@ -106,7 +113,8 @@ class ProjectStore(private val prefs: SharedPreferences) {
 
     fun currentId(): String {
         val stored = prefs.getString(CURRENT_KEY, null)
-        // 当前指针失效（项目被外部清掉）→ 回落默认项目，绝不返回不存在的 id（P2）。
+        // The current pointer went stale (the project was cleared externally) -> fall back to the
+        // default project, never return an id that does not exist (P2).
         val projects = decode()
         return if (projects.any { it.id == stored }) stored!! else ProjectLogic.DEFAULT_PROJECT_ID
     }
@@ -123,7 +131,7 @@ class ProjectStore(private val prefs: SharedPreferences) {
         return Result.success(created)
     }
 
-    /** @return false 当 [id] 不存在（不静默切换，P2）。 */
+    /** @return false when [id] does not exist (no silent switch, P2). */
     fun switchTo(id: String): Boolean {
         if (byId(id) == null) return false
         prefs.edit().putString(CURRENT_KEY, id).apply()
@@ -132,14 +140,17 @@ class ProjectStore(private val prefs: SharedPreferences) {
     }
 
     /**
-     * 删除项目：这里只动注册表。该项目名下的会话、沙箱目录、改动记录与云端基线由 UI
-     * 层按顺序清掉（[com.yangz3720.simplywork.ui.agent.AgentViewModel.deleteProject]）——
-     * 注册表不认识会话库与工作区，把那些也塞进来会让这一层变胖且无法单测。
+     * Delete a project: this only touches the registry. The sessions, sandbox directory, change
+     * log and cloud baseline under that project are cleared in order by the UI layer
+     * ([com.yangz3720.simplywork.ui.agent.AgentViewModel.deleteProject]) -- the registry knows
+     * nothing about the session DB and the workspace, and shoehorning those in as well would make
+     * this layer fat and impossible to unit test.
      *
-     * 默认项目不可删：它是全部 pre-v1.3 会话的兜底归属（见 [currentId]），删掉会让
-     * 那些会话无处可去。
+     * The default project cannot be deleted: it is the fallback home of every pre-v1.3 session
+     * (see [currentId]), and deleting it would leave those sessions nowhere to go.
      *
-     * @return failure 当 [id] 是默认项目或不存在（显式失败，不静默丢弃，P2）。
+     * @return failure when [id] is the default project or does not exist (explicit failure, no
+     * silent drop, P2).
      */
     fun delete(id: String): Result<Unit> {
         if (id == ProjectLogic.DEFAULT_PROJECT_ID) {
@@ -150,7 +161,8 @@ class ProjectStore(private val prefs: SharedPreferences) {
             return Result.failure(IllegalArgumentException("未知项目：$id"))
         }
         encode(existing.filterNot { it.id == id })
-        // 当前指针指向被删项目 → 回落默认，绝不留悬空指针（与 [currentId] 同一条规则）。
+        // The current pointer names the deleted project -> fall back to the default, never leave a
+        // dangling pointer (the same rule as [currentId]).
         if (prefs.getString(CURRENT_KEY, null) == id) {
             prefs.edit().putString(CURRENT_KEY, ProjectLogic.DEFAULT_PROJECT_ID).apply()
         }
@@ -158,19 +170,20 @@ class ProjectStore(private val prefs: SharedPreferences) {
         return Result.success(Unit)
     }
 
-    // ----- OneDrive 绑定（v1.4）-----
+    // ----- OneDrive binding (v1.4) -----
 
     fun oneDriveBinding(projectId: String): OneDriveBinding? = byId(projectId)?.oneDrive
 
-    /** 所有已绑定云端的项目 id（同步协调器按此枚举，避免全量扫）。 */
+    /** Every project id bound to the cloud (the sync coordinator enumerates these instead of doing a full scan). */
     fun boundProjectIds(): List<String> = decode().filter { it.oneDrive != null }.map { it.id }
 
     /**
-     * 绑定的唯一写入口：`transform` 收到当前绑定（可能为 null），返回新绑定，
-     * 返回 null 即解除绑定。绑定/解除/推进 deltaLink/记录同步时间都走这里，
-     * 保证"项目只有一个云端文件夹"这个不变量不被绕开。
+     * The single write entry point for a binding: `transform` receives the current binding
+     * (possibly null) and returns the new binding; returning null means unbind. Bind / unbind /
+     * advancing deltaLink / recording the sync time all go through here, so the invariant
+     * "a project has exactly one cloud folder" cannot be routed around.
      *
-     * @return false 当 [projectId] 不存在（显式失败，不静默丢弃写操作）。
+     * @return false when [projectId] does not exist (explicit failure, no silent drop of a write).
      */
     fun updateOneDrive(projectId: String, transform: (OneDriveBinding?) -> OneDriveBinding?): Boolean {
         val existing = decode()

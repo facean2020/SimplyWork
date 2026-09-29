@@ -13,22 +13,23 @@ plugins {
 }
 
 /**
- * OneDrive 接入的 Entra 应用注册 client id。**唯一填写点** —— 见
- * `docs/PlaningStages/onedrive-setup.md`。它驱动 `BuildConfig.MSAL_CLIENT_ID`，
- * 后者在运行时生成 MSAL 配置文件（`res/raw` 无法插值）。
+ * Entra app registration client id for OneDrive integration. **The only place to fill it in** -- see
+ * `docs/PlaningStages/onedrive-setup.md`. It drives `BuildConfig.MSAL_CLIENT_ID`, which generates the
+ * MSAL config file at runtime (`res/raw` cannot interpolate).
  */
 val msalClientId: String = (findProperty("msalClientId") as String?)
     ?.takeIf { it.isNotBlank() && !it.startsWith("REPLACE") }
     ?: "REPLACE-WITH-CLIENT-ID"
 
 /**
- * 签名哈希（证书 SHA-1 的 base64）。MSAL Android 的回调地址是
- * `msauth://<包名>/<URL 编码后的这个值>` —— 不是 `msal<clientId>://auth`
- * （那是 MSAL.NET 的形式，在 Android 上属于 legacy）。
+ * Signature hash (base64 of the certificate SHA-1). The MSAL Android callback address is
+ * `msauth://<package name>/<this value, URL-encoded>` -- not `msal<clientId>://auth`
+ * (that is the MSAL.NET form, which is legacy on Android).
  *
- * 缺省直接从 debug keystore 现算，所以调试构建**不需要手工维护**它；release 或换签名
- * 时用 `-PmsalSignatureHash=…` 或在 gradle.properties 覆盖。注意：这是配置期读取的
- * 未声明输入，换了 keystore 后配置缓存可能仍用旧值，`--rerun-tasks` 可强制刷新。
+ * By default it is computed right here from the debug keystore, so debug builds **need no manual
+ * maintenance** of it; for release or a different signing key, override with `-PmsalSignatureHash=...`
+ * or in gradle.properties. Note: this is an undeclared input read at configuration time, so after
+ * swapping keystores the configuration cache may still use the old value; `--rerun-tasks` forces a refresh.
  */
 fun debugKeystoreSignatureHash(): String? {
     val keystore = File(System.getProperty("user.home"), ".android/debug.keystore")
@@ -51,13 +52,16 @@ val msalSignatureHash: String = (findProperty("msalSignatureHash") as String?)
     ?: "REPLACE-WITH-SIGNATURE-HASH"
 
 /**
- * 发布签名凭证（V1.0）：只从 `local.properties`（已 gitignore）读，仓库里不留任何密钥材料。
- * 缺任意一项就不建 signingConfig —— 别的机器/CI 上 debug 构建照常，release 产物则显式叫
- * `app-release-unsigned.apk`，而不是拿空口令去签出一个看着像正式包的残次品。
+ * Release signing credentials (V1.0): read only from `local.properties` (gitignored); no key material is
+ * ever left in the repository. If any single item is missing no signingConfig is created -- on other
+ * machines/CI debug builds work as usual, while the release artifact is explicitly named
+ * `app-release-unsigned.apk`, rather than being signed with an empty password into a defective build that
+ * looks like a real package.
  *
- * `RELEASE_STORE_FILE` 相对**仓库根**解析（下面的 `rootProject.file`），与 `keystore/`
- * 放根目录的布局一致。注意这是配置期读取的未声明输入：改了 local.properties 后配置缓存
- * 可能仍用旧值，`--rerun-tasks` 可强制刷新（与上面 msalSignatureHash 同一个坑）。
+ * `RELEASE_STORE_FILE` is resolved relative to the **repository root** (`rootProject.file` below),
+ * matching the layout that keeps `keystore/` in the root directory. Note this is an undeclared input read
+ * at configuration time: after editing local.properties the configuration cache may still use the old
+ * value, and `--rerun-tasks` forces a refresh (the same trap as msalSignatureHash above).
  */
 val releaseSigning: Map<String, String> = run {
     val props = Properties()
@@ -81,7 +85,7 @@ android {
         applicationId = "com.yangz3720.simplywork"
         minSdk = 34
         targetSdk = 35
-        // V1.1：修 V1.0 的 5 个体验问题（弹窗形态、密钥打码、上下文窗口、自动批准）。
+        // V1.1: fixes the 5 UX issues of V1.0 (dialog shape, API key masking, context window, auto-approval).
         versionCode = 2
         versionName = "1.1"
 
@@ -89,13 +93,13 @@ android {
 
         buildConfigField("String", "MSAL_CLIENT_ID", "\"$msalClientId\"")
         buildConfigField("String", "MSAL_SIGNATURE_HASH", "\"$msalSignatureHash\"")
-        // manifest 的 BrowserTabActivity path 用**未编码**的哈希（且要带前导 `/`）；
-        // 配置文件里的 redirect_uri 才用 URL 编码后的。两者取值同源。
+        // The manifest's BrowserTabActivity path uses the **unencoded** hash (and must carry a leading `/`);
+        // only the config file's redirect_uri uses the URL-encoded one. Both take their value from the same source.
         manifestPlaceholders["msalSignatureHash"] = msalSignatureHash
     }
 
     signingConfigs {
-        // 凭证齐全才建：否则 release 退化成未签名产物（名字里带 -unsigned，不静默）。
+        // Created only when the credentials are complete: otherwise release degrades to an unsigned artifact (named with -unsigned, not silent).
         if (releaseSigningReady) {
             create("release") {
                 storeFile = rootProject.file(releaseSigning.getValue("RELEASE_STORE_FILE"))
@@ -108,9 +112,9 @@ android {
 
     buildTypes {
         release {
-            // V1.0 裁剪：R8 代码裁剪 + 资源压缩。第三方库的 keep 规则在
-            // app/proguard-rules.pro，那里逐条注明了是给谁加的 —— 这条路径剪坏东西
-            // 只在运行时暴露，所以每次改规则都要真机跑一遍。
+            // V1.0 trimming: R8 code shrinking + resource shrinking. The keep rules of third-party libraries
+            // live in app/proguard-rules.pro, where each entry notes which library it was added for -- this
+            // code path only exposes breakage at runtime, so every rule change needs an on-device run.
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -138,7 +142,7 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)
-    // 图标（compose BOM 管理的官方 Compose 家族工件，icons-core 已被传递缓存在本地）
+    // Icons (official Compose family artifact managed by the Compose BOM; icons-core is already cached locally as a transitive dependency)
     implementation("androidx.compose.material:material-icons-core")
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.graphics)
@@ -161,10 +165,10 @@ dependencies {
     // AndroidX JavaScriptEngine
     implementation(libs.androidx.javascriptengine)
 
-    // MSAL（OneDrive 个人账号 OAuth 2.0 登录）
+    // MSAL (OneDrive personal account OAuth 2.0 sign-in)
     implementation(libs.msal)
 
-    // Markdown rendering（用户授权的依赖例外：自写解析器换官方库方案）
+    // Markdown rendering (a dependency exception authorized by the user: replacing a hand-written parser with the official library)
     implementation(libs.mikepenz.markdown.renderer)
     implementation(libs.mikepenz.markdown.renderer.m3)
 

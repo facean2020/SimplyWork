@@ -28,8 +28,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 运行驱动（v1.6）：run 现在活在进程级 supervisor 里，本文件验的正是"驱动与 UI 无关"这件事
- * —— 没有 ViewModel，run 照样跑完、照样被停下、照样触发前台服务的启停回调。
+ * Run driver (v1.6): a run now lives in a process-level supervisor, and what this file pins down is
+ * exactly that "the driver is independent of the UI" -- with no ViewModel the run still finishes, is still stopped, and still fires the foreground service start/stop hooks.
  */
 class AgentRunSupervisorTest {
 
@@ -41,7 +41,7 @@ class AgentRunSupervisorTest {
         override fun generateStream(request: ModelRequest) = throw UnsupportedOperationException()
     }
 
-    /** 一直挂起：用来验停止/取消语义。 */
+    /** Hangs forever: used to pin down stop/cancel semantics. */
     private inner class HangingProvider : ModelProvider {
         val blocker = CompletableDeferred<Unit>()
         override val providerId = "hanging"
@@ -53,7 +53,7 @@ class AgentRunSupervisorTest {
         override fun generateStream(request: ModelRequest) = throw UnsupportedOperationException()
     }
 
-    /** 单轮纯文本响应：run 会在这一轮直接收尾（无工具调用 → 完成守卫放行）。 */
+    /** A single plain-text turn: the run wraps up in this turn (no tool call -> the completion guard lets it through). */
     private fun response(text: String) = ModelResponse(
         id = "resp-${System.nanoTime()}",
         model = "scripted",
@@ -93,7 +93,7 @@ class AgentRunSupervisorTest {
 
         waitFor { !supervisor.state.value.running }
 
-        // 循环真的跑完了：会话被落库，事件里出现过 Completed。
+        // the loop really did run to the end: the session is persisted, and a Completed event showed up.
         assertTrue(runtime.repository.activePath(session.id).size >= 3)
         assertTrue(events.any { it is AgentStepEvent.Completed })
         assertNull(supervisor.state.value.sessionId)
@@ -173,7 +173,7 @@ class AgentRunSupervisorTest {
         assertEquals(0, started)
     }
 
-    /** 事件收集器：在独立 scope 里订阅，模拟 UI 侧的投影订阅者。 */
+    /** Event collector: subscribes in its own scope, standing in for the UI-side projection subscriber. */
     private fun CoroutineScope.collectEvents(
         supervisor: AgentRunSupervisor,
         sink: MutableList<AgentStepEvent>

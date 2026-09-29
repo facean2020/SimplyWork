@@ -5,8 +5,10 @@ import com.yangz3720.simplywork.core.workspace.AgentWorkspace
 import java.io.File
 
 /**
- * 一次绑定/同步做了什么的投影，供 UI 一行摘要（不上报就不算成功，P2）。
- * [localWins] 非空意味着双向都改过同一路径、本地覆盖了云端，用户需要知情。
+ * A projection of what one bind/sync actually did, for the UI's one-line summary (P2: if it was
+ * not reported, it did not happen).
+ * A non-empty [localWins] means both sides changed the same path and the local copy overwrote
+ * the cloud one, so the user needs to know about it.
  */
 data class SyncReport(
     val binding: OneDriveBinding,
@@ -19,41 +21,52 @@ data class SyncReport(
 )
 
 /**
- * 项目沙箱 ↔ 云端文件夹的**双向镜像**（v1.4）。纯逻辑 + [RemoteDrive] 端口注入 →
- * JVM 可测，不碰 Android、不碰网络实现。
+ * **Two-way mirror** between a project sandbox and a cloud folder (v1.4). Pure logic with the
+ * [RemoteDrive] port injected -> testable on the JVM, touching neither Android nor the network
+ * implementation.
  *
- * 四条不变量：
- * 1. **id 是主键，路径只是推导结果**：目录/文件重命名在云端只换 name，路径随之变化，
- *    所以删除只能靠清单把 itemId 反查回路径。
- * 2. **拉取只覆盖"本地没动过"的文件**：本地自上次同步后也改过的同路径，判为冲突，
- *    本地胜出（agent 的产出在本地，覆盖会丢工作成果），交给 push 覆盖云端。
- * 3. **绝不因沙箱疑似被清空而清空云端**：本地一个文件都不剩而清单非空时拒绝删除云端，
- *    改为产出 warning（重装/清数据的场景下照清单删云端 = 抹掉用户云盘）。
- * 4. **绑定不接受"两边都有内容"**：首轮方向只由本地有没有文件决定，两边都非空时
- *    宁可拒绝并让人来选，也不自动猜（见 [bind]）。
+ * Four invariants:
+ * 1. **id is the primary key, the path is only a derived result**: renaming a directory/file in
+ *    the cloud only swaps its name there and the path follows, so a delete can only work by
+ *    looking the itemId back up to a path through the manifest.
+ * 2. **A pull only overwrites files "the local side has not touched"**: the same path that was
+ *    also modified locally since the last sync counts as a conflict and the local side wins
+ *    (the agent's output lives locally, and overwriting it would throw away work), leaving push
+ *    to overwrite the cloud copy.
+ * 3. **Never empty the cloud just because the sandbox looks emptied**: when not one file is
+ *    left locally while the manifest is non-empty, refuse to delete from the cloud and emit a
+ *    warning instead (deleting the cloud per the manifest after a reinstall / data clear =
+ *    erasing the user's drive).
+ * 4. **A bind does not accept "both sides have content"**: the direction of the first round is
+ *    decided purely by whether the local side has files, and when both are non-empty it would
+ *    rather refuse and let a human choose than guess (see [bind]).
  */
 class ProjectSyncEngine(
     private val workspace: AgentWorkspace,
     private val manifests: SyncManifestStore,
     private val nowMs: () -> Long = System::currentTimeMillis,
     /**
-     * 单个文件的镜像上限。下载与上传都是**整文件过一遍内存**（[RemoteDrive.download]
-     * 返回 ByteArray），所以不设上限时一个视频就能把 App 打崩 —— 实测把空项目绑到含大
-     * 文件的云端文件夹会抛 `OutOfMemoryError`。超过上限的文件**两边都不动**，只出一条
-     * 汇总提示：宁可镜像不完整，也不能崩。
+     * The mirror cap for a single file. Both download and upload push the **whole file through
+     * memory** ([RemoteDrive.download] returns a ByteArray), so with no cap a single video is
+     * enough to crash the app -- measured: binding an empty project to a cloud folder holding a
+     * large file throws `OutOfMemoryError`. Files over the cap are **left untouched on both
+     * sides**, with just one aggregated hint: an incomplete mirror beats a crash.
      */
     private val maxSyncFileBytes: Long = DEFAULT_MAX_SYNC_FILE_BYTES
 ) {
 
     /**
-     * 绑定到云端文件夹并完成**首轮对齐**。方向由本地工作区有没有文件决定：
-     * - 本地没有文件 → 云端为事实源，全量拉取下来；
-     * - 本地有文件、云端文件夹是空的 → 本地为事实源，整棵递交上去；
-     * - **两边都有文件 → 拒绝绑定**。没有可比的时钟或版本号，自动选一边就可能覆盖
-     *   用户的工作成果，所以把选择权交回人（P0）。
+     * Binds to a cloud folder and completes the **first alignment round**. The direction is
+     * decided by whether the local workspace has files:
+     * - no local files -> the cloud is the source of truth, pull everything down;
+     * - local files while the cloud folder is empty -> the local side is the source of truth,
+     *   submit the whole tree;
+     * - **both sides have files -> refuse the bind**. There is no comparable clock or version
+     *   number, and picking a side automatically could overwrite the user's work, so the choice
+     *   goes back to the human (P0).
      *
-     * 网盘根目录不可绑定（[RemoteItem.parentId] 为 null 即根）：整盘镜像会把删除
-     * 传播放大到不可控范围。
+     * The drive root cannot be bound ([RemoteItem.parentId] being null means root): mirroring a
+     * whole drive would blow delete propagation up to an uncontrollable scale.
      */
     suspend fun bind(
         remote: RemoteDrive,
@@ -65,7 +78,8 @@ class ProjectSyncEngine(
         require(folder.isFolder) { "'$folderPath' 不是文件夹：项目只能绑定到文件夹" }
         require(folder.parentId != null) { "不能绑定网盘根目录，请进入下一层挑选一个文件夹" }
 
-        // reset 全量枚举：既拿到云端现状，也拿到可用的 delta 基线。
+        // A reset full enumeration: it hands back both the current cloud state and a usable
+        // delta baseline.
         val delta = remote.delta(folder.id, null)
         val acc = Acc()
         val seed = SyncManifest(folderId = folder.id, folders = mapOf("" to folder.id))
@@ -87,9 +101,11 @@ class ProjectSyncEngine(
     }
 
     /**
-     * 在云端**新建**文件夹并立刻绑定。新建出来的目录必然是空的，所以首轮方向仍由
-     * 本地有没有文件决定（见 [bind]）。用 fail 冲突策略：同名已存在会显式报错，
-     * 而不是把两个项目悄悄打进同一个云端目录。
+     * **Creates** a folder in the cloud and binds it straight away. A freshly created directory
+     * is necessarily empty, so the direction of the first round is still decided by whether the
+     * local side has files (see [bind]). Uses the fail conflict policy: a same-named folder that
+     * already exists errors out explicitly instead of quietly cramming two projects into one
+     * cloud directory.
      */
     suspend fun createFolderAndBind(
         remote: RemoteDrive,
@@ -102,7 +118,7 @@ class ProjectSyncEngine(
         bind(remote, projectId, created.id, folderPath).getOrThrow()
     }
 
-    /** 增量同步：先按 deltaLink 拉云端的改动，再把本地的改动推上去。 */
+    /** Incremental sync: pull the cloud's changes via deltaLink first, then push the local changes up. */
     suspend fun sync(
         remote: RemoteDrive,
         projectId: String,
@@ -111,8 +127,9 @@ class ProjectSyncEngine(
         val baseline = manifests.load(projectId)
             ?: throw IllegalStateException("这个项目还没有同步过，请先选一个云端文件夹")
         val acc = Acc()
-        // 游标过期（HTTP 410）不是失败：以全量枚举重建基线，reset=true 让引擎
-        // 仍能识别"云端已删但清单里还有"的条目。
+        // An expired cursor (HTTP 410) is not a failure: rebuild the baseline from a full
+        // enumeration, and reset=true still lets the engine recognise "deleted in the cloud but
+        // still in the manifest" entries.
         val delta = try {
             remote.delta(baseline.folderId, baseline.deltaLink)
         } catch (e: DeltaCursorExpired) {
@@ -125,15 +142,16 @@ class ProjectSyncEngine(
         acc.toReport(binding.copy(deltaLink = delta.deltaLink, lastSyncedAt = nowMs()))
     }
 
-    /** 解除绑定：只丢基线，云端与本地各自保留现状（绝不顺手删任何一边）。 */
+    /** Unbind: drop the baseline only; the cloud and the local side each keep what they have (never incidentally delete either side). */
     fun unbind(projectId: String) {
         manifests.delete(projectId)
     }
 
     /**
-     * 只推送、不拉取。给"一轮 agent run 刚跑完"用：本地刚被写过，需要的是把产出送上去，
-     * 而不是再拉一遍云端。因为只在本地 stat 与基线不同时才发请求，无改动时**零网络调用**
-     * —— 这是懒惰同步省电的关键。
+     * Push only, no pull. For "an agent run just finished": the local side was just written to,
+     * so what is needed is sending the output up, not pulling the cloud down a second time.
+     * Because a request only goes out when the local stat differs from the baseline, a run with
+     * no changes makes **zero network calls** -- that is the key to lazy sync saving power.
      */
     suspend fun pushOnly(
         remote: RemoteDrive,
@@ -148,11 +166,12 @@ class ProjectSyncEngine(
         acc.toReport(binding.copy(lastSyncedAt = nowMs()))
     }
 
-    // ----- 拉取 -----
+    // ----- pull -----
 
     /**
-     * 把一批云端变化应用到本地清单/磁盘：登记新增/修改并落盘，按清单删除本地已消失
-     * 的条目。
+     * Applies a batch of cloud changes onto the local manifest/disk: registers the additions and
+     * modifications and persists them, then deletes the local entries that are gone from the
+     * cloud, according to the manifest.
      */
     private suspend fun applyDelta(
         remote: RemoteDrive,
@@ -165,8 +184,9 @@ class ProjectSyncEngine(
         val files = LinkedHashMap(manifest.files)
         val byId = delta.items.associateBy { it.id }
 
-        // 1) 云端条目 → 逻辑路径。父目录可能在本批次里才出现，迭代到不动点
-        //    （delta 批次带整条新建目录链，一两轮即收敛）。
+        // 1) Cloud entries -> logical paths. The parent directory may only appear within this
+        //    very batch, so iterate to a fixed point (a delta batch carries the whole chain of
+        //    newly created directories, so one or two rounds converge).
         val idToPath = HashMap<String, String>().apply { folders.forEach { (p, id) -> this[id] = p } }
         var pending = delta.items.filter { !it.deleted && it.id != manifest.folderId }
             .filter { safeName(it.name) != null || it.isFolder }
@@ -183,7 +203,7 @@ class ProjectSyncEngine(
             pending = stuck
         }
 
-        // 2) 删除集合 = 增量删除项 + （全量重建时）清单有而枚举里没有的项
+        // 2) Delete set = incremental deleted items + (on a full rebuild) manifest entries that are absent from the enumeration
         val deletedIds = LinkedHashSet<String>()
         delta.items.filter { it.deleted }.forEach { deletedIds += it.id }
         if (delta.reset) {
@@ -195,7 +215,7 @@ class ProjectSyncEngine(
         val folderPathByItem = folders.entries.associate { (p, id) -> id to p }
         for (id in deletedIds) {
             folderPathByItem[id]?.let { path ->
-                if (path.isEmpty()) return@let // 绑定的根永不删
+                if (path.isEmpty()) return@let // the bound root is never deleted
                 if (runCatching { workspace.delete(projectId, path, recursive = true) }.isSuccess) acc.deletedLocal++
                 files.keys.filter { it == path || it.startsWith("$path/") }.forEach { files.remove(it) }
                 folders.keys.filter { it == path || it.startsWith("$path/") }.forEach { folders.remove(it) }
@@ -207,7 +227,7 @@ class ProjectSyncEngine(
             }
         }
 
-        // 3) 落盘云端的新增/修改
+        // 3) Write the cloud's additions/modifications to disk
         val root = workspace.projectDir(projectId)
         for ((id, path) in idToPath) {
             if (id == manifest.folderId || path.isEmpty()) continue
@@ -219,13 +239,13 @@ class ProjectSyncEngine(
                 continue
             }
             val entry = files[path]
-            if (entry != null && entry.eTag == item.eTag) continue // 云端未变
+            if (entry != null && entry.eTag == item.eTag) continue // cloud unchanged
             val local = File(root, path)
             val stat = local.takeIf { it.isFile }?.let { LocalStat(it.lastModified(), it.length()) }
             val localChanged = entry != null && stat != null &&
                 (stat.sizeBytes != entry.localSizeBytes || stat.modifiedAtMs != entry.localModifiedAtMs)
             if (localChanged) {
-                acc.localWins += path // 冲突：本地胜出，交给 push
+                acc.localWins += path // conflict: local wins, leave it to push
                 continue
             }
             if (item.sizeBytes > maxSyncFileBytes) {
@@ -244,9 +264,9 @@ class ProjectSyncEngine(
         return manifest.copy(folders = folders, files = files)
     }
 
-    // ----- 推送 -----
+    // ----- push -----
 
-    /** 把本地沙箱的改动推到云端：新的/改过的上传，本地删掉的云端也删。 */
+    /** Push the local sandbox's changes to the cloud: new/modified ones get uploaded, ones deleted locally get deleted in the cloud too. */
     private suspend fun push(
         remote: RemoteDrive,
         projectId: String,
@@ -257,7 +277,7 @@ class ProjectSyncEngine(
         val folders = LinkedHashMap(manifest.folders)
         val files = LinkedHashMap(manifest.files)
 
-        // 目录浅→深，保证父目录 id 先就位（新嵌套目录一次 push 内全部建好）
+        // Directories shallow -> deep, so parent ids are in place first (new nested directories all get created within one push)
         val dirs = localDirs(root)
         dirs.sortedBy { depth(it) }.forEach { path ->
             if (folders.containsKey(path)) return@forEach
@@ -269,7 +289,7 @@ class ProjectSyncEngine(
             folders[path] = remote.createFolder(parentId, path.substringAfterLast('/')).id
         }
 
-        // 文件：新增或本地 stat 与基线不同 → 上传
+        // Files: new, or a local stat differing from the baseline -> upload
         val local = localFiles(root)
         local.forEach { (path, stat) ->
             val entry = files[path]
@@ -281,7 +301,7 @@ class ProjectSyncEngine(
                 acc.warnings += "父目录未登记，跳过上传：$path"
                 return@forEach
             }
-            // 上传同样整文件过内存，本地突然出现一个大文件（模型写的、用户放的）也要挡住。
+            // Upload pushes the whole file through memory too, so a large file that suddenly turns up locally (written by the model, dropped in by the user) has to be blocked as well.
             if (stat.sizeBytes > maxSyncFileBytes) {
                 acc.oversized += 1
                 return@forEach
@@ -291,8 +311,10 @@ class ProjectSyncEngine(
             acc.uploaded++
         }
 
-        // 删除云端：本地已删的条目。若本地一个文件都不剩而清单非空，判为沙箱被清空
-        // （重装/清数据），拒绝照清单清空用户云盘 —— 只报 warning。
+        // Deleting in the cloud: entries that were deleted locally. If not a single file is left
+        // locally while the manifest is non-empty, that is read as a cleared sandbox
+        // (reinstall / data clear), so refuse to empty the user's drive per the manifest -- report
+        // a warning only.
         val wipeGuard = local.isEmpty() && files.isNotEmpty()
         if (wipeGuard) {
             acc.warnings += "项目里已经没有文件，为免误删已跳过云端删除（云端 ${files.size} 个文件保持原样）"
@@ -311,7 +333,7 @@ class ProjectSyncEngine(
         return manifest.copy(folders = folders, files = files)
     }
 
-    // ----- 本地遍历 -----
+    // ----- local traversal -----
 
     private data class LocalStat(val modifiedAtMs: Long, val sizeBytes: Long)
 
@@ -337,9 +359,9 @@ class ProjectSyncEngine(
         }
     }
 
-    // ----- 辅助 -----
+    // ----- helpers -----
 
-    /** 云端文件名不可含分隔符，也不可为 `.`/`..`；其余一律照收。 */
+    /** A cloud file name must not contain a separator and must not be `.`/`..`; everything else is accepted as-is. */
     private fun safeName(name: String): String? =
         name.takeIf { it.isNotEmpty() && it != "." && it != ".." && !it.contains('/') && !it.contains('\\') }
 
@@ -355,7 +377,7 @@ class ProjectSyncEngine(
         boundAt = nowMs()
     )
 
-    /** `inner` 是为了读外层的 [maxSyncFileBytes] 拼出跳过提示。 */
+    /** `inner` is so the skip hint can read the outer [maxSyncFileBytes]. */
     private inner class Acc {
         var uploaded = 0
         var downloaded = 0
@@ -383,7 +405,7 @@ class ProjectSyncEngine(
     }
 
     companion object {
-        /** 16 MiB：文档、代码、笔记绰绰有余，又不至于让整文件缓冲把堆撑爆。 */
+        /** 16 MiB: ample for documents, code and notes, yet not enough to let whole-file buffering blow up the heap. */
         const val DEFAULT_MAX_SYNC_FILE_BYTES = 16L * 1024 * 1024
     }
 }

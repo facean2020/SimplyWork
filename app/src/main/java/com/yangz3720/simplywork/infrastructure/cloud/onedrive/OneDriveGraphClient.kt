@@ -34,22 +34,22 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
-/** 云端返回非 2xx。[status] 供调用方区分（410 走 [DeltaCursorExpired]，401 触发续期重试）。 */
+/** The cloud returned a non-2xx status. [status] lets callers tell cases apart (410 goes to [DeltaCursorExpired], 401 triggers a renewal retry). */
 class OneDriveHttpException(val status: Int, val detail: String) :
     RuntimeException("OneDrive 请求失败（HTTP $status）：${detail.take(300)}")
 
-/** 响应结构不符合预期（缺 deltaLink、把文件当文件夹等）。显式失败，不静默猜。 */
+/** The response shape is not what we expect (missing deltaLink, a file treated as a folder, etc.). Fail explicitly, never guess silently. */
 class OneDriveProtocolException(message: String) : RuntimeException(message)
 
 /**
- * Microsoft Graph 的 OneDrive 实现（v1.4）。
+ * The OneDrive implementation on top of Microsoft Graph (v1.4).
  *
- * 用 Ktor 直接打 REST，不引入 `msgraph-sdk-java`：本应用只需要 7 个端点，
- * 官方 Java SDK 会拖进 azure-identity + 一堆反射依赖，对端侧 APK 完全不成比例。
- * 解析用 kotlinx.serialization 手写（Graph 的 `folder`/`file`/`deleted` 是
- * "facate 存在即真"的语义，强类型反序列化反而别扭）。
+ * Talk REST directly with Ktor instead of pulling in `msgraph-sdk-java`: this app needs only 7 endpoints, and the
+ * official Java SDK would drag in azure-identity plus a pile of reflection dependencies, utterly out of proportion for an on-device APK.
+ * Parsing is hand-written with kotlinx.serialization (Graph's `folder`/`file`/`deleted` follow
+ * a "the facet exists so it is true" semantics, which makes strongly typed deserialization awkward instead).
  *
- * 只支持 `/me/drive`（个人账号自己的盘），不带 driveId —— 产品约定"绑自己的网盘"。
+ * Only `/me/drive` is supported (the personal account's own drive), no driveId — the product convention is "bind your own cloud drive".
  */
 class OneDriveGraphClient(
     private val auth: OneDriveAuth,
@@ -59,8 +59,8 @@ class OneDriveGraphClient(
     private val json = Json { ignoreUnknownKeys = true }
 
     private val http: HttpClient = httpClient ?: HttpClient(OkHttp) {
-        // 元数据调用的默认值：这些都是小 JSON，60s 绰绰有余。批量传输（下载）在各自的
-        // 请求上覆盖，见 download()。
+        // Defaults for metadata calls: these are all small JSON payloads, so 60s is more than enough. Bulk transfers (downloads) override
+        // them on their own requests, see download().
         install(HttpTimeout) {
             requestTimeoutMillis = 60_000
             connectTimeoutMillis = 15_000
@@ -99,7 +99,7 @@ class OneDriveGraphClient(
             body = buildJsonObject {
                 put("name", name)
                 put("folder", buildJsonObject { })
-                // fail：同名已存在时显式报错，而不是把两个项目悄悄打进同一个云端目录。
+                // fail: report an explicit error when the name already exists, rather than quietly packing two projects into the same cloud folder.
                 put("@microsoft.graph.conflictBehavior", "fail")
             }
         )
@@ -114,7 +114,7 @@ class OneDriveGraphClient(
             val page = try {
                 json(next)
             } catch (e: OneDriveHttpException) {
-                // 游标过期：Graph 要求按 Location 里的新 nextLink 从头全量重建。
+                // Cursor expired: Graph requires a full rebuild from scratch following the new nextLink in Location.
                 if (e.status == HttpStatusCode.Gone.value) {
                     throw DeltaCursorExpired("OneDrive delta 游标已过期，需要重建基线")
                 }
@@ -136,16 +136,16 @@ class OneDriveGraphClient(
     override suspend fun download(itemId: String): ByteArray {
         val response = http.get("$BASE/me/drive/items/${seg(itemId)}/content") {
             header(HttpHeaders.Authorization, "Bearer ${auth.accessToken()}")
-            // 元数据的 60s 默认值对批量传输太紧：大文件在慢链路上超过它只是慢，不是故障，
-            // 按 60s 判失败会让"拉取"在慢网络上必败。这里放宽整体上限，链路真的死掉
-            // （长时间收不到任何字节）仍然由 60s 的 socket 超时兜住。
+            // The metadata default of 60s is too tight for bulk transfer: a big file on a slow link taking longer than that is slow, not broken,
+            // and failing on the 60s mark would make "pull" always fail on slow networks. The overall ceiling is relaxed here; a link that really does die
+            // (no bytes received for a long time) is still caught by the 60s socket timeout.
             timeout { requestTimeoutMillis = BULK_REQUEST_TIMEOUT_MS }
         }
         if (!response.status.isSuccess()) {
             throw OneDriveHttpException(response.status.value, response.bodyAsText())
         }
-        // /content 是 302 到预授权地址，OkHttp 自动跟随；跳转到别的 host 时 OkHttp 会
-        // 丢掉 Authorization 头，正好是我们要的（预授权 URL 不接受、也不需要它）。
+        // /content is a 302 to a pre-authorised URL that OkHttp follows automatically; when the redirect goes to another host OkHttp
+        // drops the Authorization header, which is exactly what we want (the pre-authorised URL neither accepts nor needs it).
         return response.readRawBytes()
     }
 
@@ -166,7 +166,7 @@ class OneDriveGraphClient(
         }
     }
 
-    // ----- 大文件：上传会话（≥4MiB 必须走，简单上传会超时/被截断）-----
+    // ----- Large files: upload session (mandatory from 4MiB up; a simple upload would time out or be truncated)-----
 
     private suspend fun uploadInSession(itemPath: String, fileName: String, bytes: ByteArray): RemoteItem {
         val session = json(
@@ -188,7 +188,7 @@ class OneDriveGraphClient(
         var offset = 0
         while (offset < bytes.size) {
             val end = minOf(offset + UPLOAD_CHUNK_BYTES, bytes.size)
-            // uploadUrl 是预授权地址：绝不带 Authorization 头。
+            // uploadUrl is a pre-authorised URL: never send an Authorization header.
             val response = http.request(uploadUrl) {
                 method = HttpMethod.Put
                 contentType(ContentType.Application.OctetStream)
@@ -208,11 +208,11 @@ class OneDriveGraphClient(
         throw OneDriveProtocolException("上传会话未产生结果：$fileName")
     }
 
-    // ----- HTTP 管道 -----
+    // ----- HTTP pipeline -----
 
     /**
-     * 发一个 JSON 请求并解析。401（令牌刚过期）强制续期后重试一次；
-     * 429 读 `Retry-After` 退避重试（Graph 的节流是常态，不是错误）。
+     * Send a JSON request and parse it. A 401 (token just expired) forces a renewal and retries once;
+     * a 429 reads `Retry-After` and retries with backoff (throttling on Graph is normal, not an error).
      */
     private suspend fun json(
         pathOrUrl: String,
@@ -276,14 +276,14 @@ class OneDriveGraphClient(
         }
     }
 
-    // ----- 解析 -----
+    // ----- Parsing -----
 
     private fun parseItem(obj: JsonObject): RemoteItem? {
         val id = obj.string("id") ?: return null
         return RemoteItem(
             id = id,
             name = obj.string("name").orEmpty(),
-            // Graph 用 facet 的存在性表达类型：有 folder 就是文件夹，有 deleted 就是已删除。
+            // Graph expresses the type through facet presence: having folder means a folder, having deleted means deleted.
             isFolder = obj["folder"] != null,
             eTag = obj.string("eTag"),
             modifiedAtMs = obj.string("lastModifiedDateTime")?.let(::parseIso).orZero(),
@@ -305,15 +305,15 @@ class OneDriveGraphClient(
     private companion object {
         const val BASE = "https://graph.microsoft.com/v1.0"
 
-        /** Graph 简单上传的稳妥上限；超过就必须走上传会话。 */
+        /** The safe ceiling for a Graph simple upload; beyond it an upload session is mandatory. */
         const val SIMPLE_UPLOAD_MAX_BYTES = 4 * 1024 * 1024
 
-        /** 上传会话分片必须是 320KiB 的整数倍（Graph 硬要求）。 */
+        /** Upload-session chunks must be a multiple of 320KiB (a hard Graph requirement). */
         const val UPLOAD_CHUNK_BYTES = 320 * 1024 * 10
 
         /**
-         * 单个文件的下载上限。取一个宽松的有限值而不是"无限"：既让慢链路下的正常下载
-         * 不再被 60s 误杀，又不会让一个卡住的请求把同步锁无限期占住。
+         * Download ceiling for a single file. A generous finite value rather than "unlimited": normal downloads on a slow link
+         * are no longer killed by the 60s limit, yet a stuck request cannot hold the sync lock indefinitely.
          */
         const val BULK_REQUEST_TIMEOUT_MS = 30 * 60 * 1000L
 

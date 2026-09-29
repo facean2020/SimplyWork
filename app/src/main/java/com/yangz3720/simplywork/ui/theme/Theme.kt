@@ -43,7 +43,7 @@ private val DarkColorScheme = darkColorScheme(
 )
 
 /**
- * 品牌基调优先：动态取色（Android 12+）默认关闭，保持"纸面 + 墨青"的固定识别。
+ * Brand tone wins: dynamic color (Android 12+) is off by default, keeping the fixed "paper + ink teal" identity.
  */
 @Composable
 fun SimplyWorkTheme(

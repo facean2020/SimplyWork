@@ -61,15 +61,15 @@ import org.junit.rules.TestWatcher
 import org.junit.runner.Description
 
 /**
- * AgentViewModel（MVI）行为测试：运行驱动 / 运行中转向 / 失败重试（Q2）/ 停止 / 多会话。
- * 全部走真实 AgentRuntime 装配（in-memory stores + scripted provider）。
+ * AgentViewModel (MVI) behavior tests: run driving / mid-run steering / failure retry (Q2) / stop / multiple sessions.
+ * Everything goes through a real AgentRuntime wiring (in-memory stores + scripted provider).
  *
- * 说明：ViewModel 默认 ioDispatcher = Dispatchers.IO（真实线程），运行完成以状态轮询
- * 等待（不进虚拟时间，避免 withTimeout 被 advanceUntilIdle 提前触发）。
+ * Note: the ViewModel defaults to ioDispatcher = Dispatchers.IO (real threads), and run completion is
+ * awaited by polling state (no virtual time, so that withTimeout is not fired early by advanceUntilIdle).
  */
 class AgentViewModelTest {
 
-    /** Main dispatcher → 空转处理（viewModelScope 需要 Main 存在即可）。 */
+    /** Main dispatcher -> a no-op handler (viewModelScope only needs Main to exist). */
     class MainTestRule : TestWatcher() {
         override fun starting(description: Description) = Dispatchers.setMain(Dispatchers.Unconfined)
         override fun finished(description: Description) = Dispatchers.resetMain()
@@ -121,8 +121,8 @@ class AgentViewModelTest {
     }
 
     /**
-     * OneDrive 接缝的哑实现：本文件的用例覆盖的是运行驱动/会话/模型选择，不覆盖云同步，
-     * 所以这里只需保证 VM 装配不被打断，并记录 push 是否按项目触发过。
+     * Dummy implementation of the OneDrive seam: what the cases in this file cover is run driving / sessions / model selection, not cloud sync,
+     * so here it only needs to keep the VM wiring from being interrupted, and to record whether a push was ever triggered per project.
      */
     private class FakeOneDrive : OneDriveOwner {
         override val account = MutableStateFlow<OneDriveAccount?>(null)
@@ -160,7 +160,7 @@ class AgentViewModelTest {
         }
     }
 
-    /** self_* 配置缝的哑实现：本文件只借它注册 fs_* 工具，不覆盖配置自改。 */
+    /** Dummy implementation of the self_* config seam: this file only borrows it to register the fs_* tools, and does not cover self-editing config. */
     private class FakeSelfConfig : AgentSelfConfig {
         override fun snapshot() = AgentSelfConfig.Snapshot(
             activeProviderId = null,
@@ -175,7 +175,7 @@ class AgentViewModelTest {
             AgentSelfConfig.ApplyResult(applied = emptyList(), rebuildPending = false, errors = emptyList())
     }
 
-    /** 首轮返回 [pre] 各一次；其后等待 [gate]，释放后返回 [final]（仅一次），再挂起。 */
+    /** Returns each of [pre] once on the first round; afterwards it waits for [gate], returns [final] (only once) after release, then suspends. */
     private class SteerableProvider(
         pre: List<ModelResponse>,
         private val final: ModelResponse
@@ -192,7 +192,7 @@ class AgentViewModelTest {
         override fun generateStream(request: ModelRequest) = throw UnsupportedOperationException()
     }
 
-    /** 第一次返回失败，其后返回 [after]。 */
+    /** Fails on the first call, returns [after] from then on. */
     private class FailingOnceProvider(private val after: ModelResponse) : ModelProvider {
         private val first = java.util.concurrent.atomic.AtomicBoolean(true)
         override val providerId = "failing"
@@ -203,7 +203,7 @@ class AgentViewModelTest {
         override fun generateStream(request: ModelRequest) = throw UnsupportedOperationException()
     }
 
-    /** 一直挂起（停止语义测试）。 */
+    /** Suspends forever (stop-semantics test). */
     private class HangingProvider : ModelProvider {
         val blocker = CompletableDeferred<Unit>()
         override val providerId = "hanging"
@@ -222,7 +222,7 @@ class AgentViewModelTest {
         override fun generateStream(request: ModelRequest) = throw UnsupportedOperationException()
     }
 
-    /** 固定脚本：按序返回。 */
+    /** Fixed script: returns responses in order. */
     private class ScriptedProvider(vararg responses: ModelResponse) : ModelProvider {
         val queue = ArrayDeque(responses.toList())
         override val providerId = "scripted"
@@ -253,15 +253,15 @@ class AgentViewModelTest {
         router = mockk<SystemOperationRouter>(relaxed = true)
     )
 
-    /** 项目文件接缝：真实实现 + 临时目录（不 mock —— 目录遍历与路径安全本来就该一起验）。 */
+    /** Project-files seam: the real implementation + a temp directory (no mock -- directory traversal and path safety are exactly what should be verified together). */
     private fun workspace(): AgentWorkspace = AgentWorkspace(File(tmp.root, "ws"))
 
     private fun files(changes: FileChangeLog = InMemoryFileChangeLog()): ProjectFilesOwner =
         LocalProjectFiles(workspace(), changes)
 
     /**
-     * 运行驱动（v1.6）：真实 supervisor + 真实 Dispatchers.IO —— 用例断言的就是"驱动在 VM
-     * 之外也照跑"。前台服务的启停回调留空（Service 是 Android 组件，不进单测）。
+     * Run driving (v1.6): a real supervisor + a real Dispatchers.IO -- what the case asserts is precisely that "driving still
+     * runs outside the VM". The foreground service's start/stop callbacks are left empty (a Service is an Android component and does not go into unit tests).
      */
     private fun runSupervisor(owner: AgentRuntimeOwner): AgentRunSupervisor = AgentRunSupervisor(
         scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
@@ -284,7 +284,7 @@ class AgentViewModelTest {
         )
     }
 
-    /** 真实时间轮询：等待谓词成立或超时。 */
+    /** Real-time polling: awaits the predicate holding or the timeout expiring. */
     private fun waitFor(timeoutMs: Long = 8000, predicate: () -> Boolean) {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (!predicate()) {
@@ -293,13 +293,13 @@ class AgentViewModelTest {
         }
     }
 
-    // ----- 用例 -----
+    // ----- cases -----
 
     @Test
     fun `send creates session, runs to completion and renders messages`() {
         val vm = viewModel(buildRuntime(ScriptedProvider(response("all done"))))
 
-        Thread.sleep(100) // init：无会话
+        Thread.sleep(100) // init: no sessions
         assertTrue(vm.uiState.value.sessions.isEmpty())
 
         vm.send("你好")
@@ -324,10 +324,10 @@ class AgentViewModelTest {
 
         vm.send("start")
         waitFor { vm.uiState.value.running }
-        // 等第一轮工具往返落库（此后 loop 挂在 generate #2 的 gate 上）
+        // Wait for the first tool round-trip to be persisted (after that the loop hangs on the gate of generate #2)
         waitFor { vm.uiState.value.messages.any { it.kind == UiMessageKind.ToolActivity } }
 
-        // 运行中输入 → 转向入队（loop 正挂在 gate 上）
+        // Input while running -> steering enqueued (the loop is hanging on the gate right now)
         vm.send("换个方向")
         vm.send("再优化一下")
 
@@ -335,8 +335,8 @@ class AgentViewModelTest {
         waitFor { !vm.uiState.value.running }
 
         val kinds = vm.uiState.value.messages.map { it.kind }
-        // 队列非空优先于完成守卫（流程图 K→L）："adjusted final" 先落一轮，转向被
-        // 下一轮 drain 后才真正闭环。
+        // A non-empty queue takes precedence over the completion guard (flowchart K->L): "adjusted final" lands one round first, and the steering
+        // only really closes the loop after being drained by the next round.
         assertEquals(
             listOf(UiMessageKind.User, UiMessageKind.ToolActivity, UiMessageKind.Assistant, UiMessageKind.Steer, UiMessageKind.Steer, UiMessageKind.Assistant),
             kinds
@@ -353,7 +353,7 @@ class AgentViewModelTest {
         waitFor { vm.uiState.value.runError != null }
         assertEquals("rate limited", vm.uiState.value.runError)
         assertFalse(vm.uiState.value.running)
-        // 失败轮没有任何 assistant 节点落库
+        // The failed round persisted no assistant node at all
         assertEquals(1, vm.uiState.value.messages.size)
 
         vm.retry()
@@ -370,12 +370,12 @@ class AgentViewModelTest {
 
         vm.send("hi")
         waitFor { vm.uiState.value.running }
-        // 等用户消息落库后再停（LoopStarted 早于落库发出）
+        // Wait until the user message is persisted before stopping (LoopStarted is emitted before the persist)
         waitFor { vm.uiState.value.messages.size == 1 }
 
         vm.stopRun()
         waitFor { !vm.uiState.value.running }
-        // 用户消息已落库，保留在投影里
+        // The user message is already persisted, so it stays in the projection
         assertEquals(1, vm.uiState.value.messages.size)
     }
 
@@ -391,7 +391,7 @@ class AgentViewModelTest {
         vm.startNewChat()
         assertNull(vm.uiState.value.currentSessionId)
         assertTrue(vm.uiState.value.messages.isEmpty())
-        assertEquals(1, vm.uiState.value.sessions.size) // 历史仍在列表里
+        assertEquals(1, vm.uiState.value.sessions.size) // history is still in the list
 
         vm.send("second")
         waitFor { !vm.uiState.value.running && vm.uiState.value.messages.size == 2 }
@@ -403,7 +403,7 @@ class AgentViewModelTest {
     fun `selectModel applies selection through owner and updates state`() {
         val owner = FakeOwner(null)
         val vm = AgentViewModel(owner, runSupervisor(owner), ApprovalCoordinator(), PermissionCoordinator(), fakeProjects(), FakeOneDrive(), files())
-        Thread.sleep(100) // init 完成后状态稳定
+        Thread.sleep(100) // state is stable once init completes
 
         vm.selectModel("deepseek", "  deepseek-chat  ")
         assertEquals(ModelSelection("deepseek", "deepseek-chat"), owner.appliedSelection)
@@ -438,7 +438,7 @@ class AgentViewModelTest {
         assertEquals(listOf("m1", "m2"), result.getOrThrow())
     }
 
-    // ----- 编辑重发（分支语义） -----
+    // ----- edit and resend (branch semantics) -----
 
     @Test
     fun `editAndResend opens a new branch and reruns without enqueueing`() {
@@ -453,11 +453,11 @@ class AgentViewModelTest {
         waitFor { vm.uiState.value.messages.any { it.kind == UiMessageKind.User && it.text == "编辑后的提问" } }
 
         val state = vm.uiState.value
-        // 活跃路径 = 新提问 + 新回答（旧分支保留但不渲染）
+        // Active path = new question + new answer (the old branch is kept but not rendered)
         val user = state.messages.first { it.kind == UiMessageKind.User }
         assertEquals("编辑后的提问", user.text)
         assertEquals("second answer", state.messages.last().text)
-        // 分支信息：同位置 2 个分支，当前第 2 个
+        // Branch info: 2 branches at the same position, currently on the 2nd
         assertEquals(2, user.branchCount)
         assertEquals(1, user.branchIndex)
     }
@@ -476,7 +476,7 @@ class AgentViewModelTest {
         waitFor { !vm.uiState.value.running }
         waitFor { vm.uiState.value.messages.first { it.kind == UiMessageKind.User }.text == "编辑后的提问" }
 
-        // 从新分支 ‹ 切回旧分支：提问与回答都恢复为旧分支内容
+        // Switch back from the new branch ‹ to the old branch: both the question and the answer revert to the old branch content
         val editedUser = vm.uiState.value.messages.first { it.kind == UiMessageKind.User }
         vm.switchBranch(editedUser.id, -1)
         waitFor { vm.uiState.value.messages.first { it.kind == UiMessageKind.User }.text == "原提问" }
@@ -487,9 +487,9 @@ class AgentViewModelTest {
         assertTrue(!state.running)
     }
 
-    // ----- 项目文件与改动卡片（v1.5） -----
+    // ----- project files and change cards (v1.5) -----
 
-    /** 内容进 JSON 字符串：换行必须转义，否则 argumentsJson 根本解析不了。 */
+    /** Content goes into a JSON string: newlines must be escaped, otherwise argumentsJson simply cannot be parsed. */
     private fun jsonString(text: String): String =
         "\"" + text.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n") + "\""
 
@@ -528,7 +528,7 @@ class AgentViewModelTest {
         vm.send("写一份笔记")
         waitFor { !vm.uiState.value.running && vm.uiState.value.messages.any { it.fileChange != null } }
 
-        // 工具真的写了文件（卡片是事实的投影，不是并行的另一份真相）
+        // The tool really did write the file (the card is a projection of the fact, not a parallel second source of truth)
         assertEquals("# 标题\n正文", ws.read(ProjectLogic.DEFAULT_PROJECT_ID, "docs/notes.md").content)
 
         val card = vm.uiState.value.messages.first { it.fileChange != null }.fileChange!!
@@ -539,7 +539,7 @@ class AgentViewModelTest {
         assertEquals(0, card.removedLines)
         assertEquals(listOf('+', '+'), card.diff.map { it.prefix })
 
-        // 底部「新增文件」小卡片
+        // The small "new files" card at the bottom
         assertEquals(listOf("docs/notes.md"), vm.uiState.value.newFiles.map { it.path })
     }
 
@@ -558,7 +558,7 @@ class AgentViewModelTest {
             log.record(change(sessionId, "tmp.md", FileChangeKind.Deleted, 3))
         }
 
-        // 再跑一轮：会话投影顺带刷新改动卡片
+        // Run one more round: the session projection incidentally refreshes the change cards
         vm.send("again")
         waitFor { !vm.uiState.value.running && vm.uiState.value.messages.size == 4 }
 
@@ -582,7 +582,7 @@ class AgentViewModelTest {
 
         vm.openProjectFiles()
         waitFor { !vm.uiState.value.filesBusy && vm.uiState.value.fileEntries.isNotEmpty() }
-        // 目录在前，其余按名字
+        // Directories first, the rest by name
         assertEquals(listOf("docs", "todo.txt"), vm.uiState.value.fileEntries.map { it.name })
         assertTrue(vm.uiState.value.fileEntries.first().isDirectory)
 
@@ -620,7 +620,7 @@ class AgentViewModelTest {
         assertNull(vm.uiState.value.filePreview)
     }
 
-    // ----- 删除会话 / 删除项目（不可撤销，必须删干净） -----
+    // ----- deleting sessions / deleting projects (irreversible, must delete cleanly) -----
 
     @Test
     fun `deleteSession clears the projection and the stored session`() {
@@ -634,7 +634,7 @@ class AgentViewModelTest {
         vm.deleteSession(sessionId)
 
         waitFor { vm.uiState.value.sessions.isEmpty() }
-        // 删的是当前会话 → 回到"新对话"空态，而不是停在一个已经不存在的会话上
+        // What was deleted is the current session -> return to the "new chat" empty state, rather than staying on a session that no longer exists
         assertNull(vm.uiState.value.currentSessionId)
         assertTrue(vm.uiState.value.messages.isEmpty())
         assertNull(runtime.repository.getSession(sessionId))
@@ -659,7 +659,7 @@ class AgentViewModelTest {
 
         waitFor { vm.uiState.value.sessions.none { it.id == first } }
         assertNull(runtime.repository.getSession(first))
-        // 当前会话不是被删的那个：投影与指针都不动
+        // The current session is not the deleted one: neither the projection nor the pointer moves
         assertEquals(second, vm.uiState.value.currentSessionId)
         assertNotNull(runtime.repository.getSession(second))
     }
@@ -676,7 +676,7 @@ class AgentViewModelTest {
         vm.switchProject(projectId)
         waitFor { vm.uiState.value.currentProjectId == projectId }
 
-        // 沙箱里放一个文件，确认它随项目一起消失（而不是留成孤儿目录）
+        // Put a file in the sandbox and confirm it disappears along with the project (rather than being left behind as an orphan directory)
         val note = File(tmp.root, "ws/$projectId/note.md")
         note.parentFile?.mkdirs()
         note.writeText("hi")
@@ -708,7 +708,7 @@ class AgentViewModelTest {
 
         vm.deleteProject(ProjectLogic.DEFAULT_PROJECT_ID)
 
-        // 拒绝必须发生在动手之前 —— 若只在注册表那一步拦，会话和沙箱会先被清空
+        // The refusal must happen before anything is touched -- if it were only blocked at the registry step, sessions and the sandbox would be cleared first
         assertEquals("默认项目不可删除", vm.uiState.value.runError)
         assertTrue(vm.uiState.value.projects.any { it.id == ProjectLogic.DEFAULT_PROJECT_ID })
         assertNotNull(runtime.repository.getSession(sessionId))

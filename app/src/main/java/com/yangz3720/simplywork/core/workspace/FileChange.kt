@@ -3,34 +3,34 @@ package com.yangz3720.simplywork.core.workspace
 import kotlinx.serialization.Serializable
 
 /**
- * 改动类型（v1.5 改动卡片的状态词）。UI 只负责把枚举翻成中文，判定逻辑不在 UI。
+ * Change kind (the state words of the v1.5 change card). The UI is only responsible for translating the enum into Chinese; the decision logic is not in the UI.
  */
 @Serializable
 enum class FileChangeKind { Created, Updated, Appended, Moved, Deleted }
 
 /**
- * 一次工作区改动（v1.5）：对话流内联 diff 卡片与底部「新增文件」小卡片的唯一数据源。
+ * One workspace change (v1.5): the single data source for the inline diff card in the conversation flow and for the small "new files" card at the bottom.
  *
- * 它是**事实**不是推测：[addedLines]/[removedLines] 由写入前后两次真实内容算出，算不出来
- * （基线被读侧上限截断、或差异区过大）时是 `null` —— 卡片就只报路径不报行数，绝不用
- * 整篇新内容冒充"新增行"。agent 走 fs_* 写入，云端同步走 [AgentWorkspace.writeBytes]，
- * 后者**不**记录改动：镜像不是"agent 改了你的文件"。
+ * It is **fact**, not guesswork: [addedLines]/[removedLines] are computed from the two real contents before and after the write, and when they cannot
+ * be computed (baseline truncated by the read-side cap, or the diff region too large) they are `null` -- the card then reports only the path, never line counts, and never
+ * passes off a whole new content as "added lines". The agent writes through fs_*, cloud sync goes through [AgentWorkspace.writeBytes], and
+ * the latter does **not** record a change: a mirror is not "the agent changed your file".
  */
 @Serializable
 data class FileChange(
-    /** 触发这次改动的工具调用 id：对话流据此把卡片贴到对应条目下。 */
+    /** Tool call id that triggered this change: the conversation flow uses it to attach the card under the matching entry. */
     val toolCallId: String? = null,
     val sessionId: String,
     val projectId: String,
-    /** 相对项目根的工作区路径。 */
+    /** Workspace path relative to the project root. */
     val path: String,
     val kind: FileChangeKind,
-    /** 重命名后的路径（仅 [FileChangeKind.Moved]）。 */
+    /** Path after the rename (only for [FileChangeKind.Moved]). */
     val toPath: String? = null,
     val addedLines: Int? = null,
     val removedLines: Int? = null,
     val diff: List<TextDiff.Line> = emptyList(),
-    /** [diff] 之后省略掉的行数。 */
+    /** Number of lines omitted after [diff]. */
     val omittedLines: Int = 0,
     val atMs: Long = 0L
 )

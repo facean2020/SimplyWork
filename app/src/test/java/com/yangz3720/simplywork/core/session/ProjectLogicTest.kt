@@ -8,8 +8,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 项目逻辑（v1.3）：名字校验、去重、默认项目、切换语义。
- * [ProjectStore] 的 SharedPreferences 壳用桩（[InMemoryPrefs]）跑真实持久化行为。
+ * Project logic (v1.3): name validation, de-duplication, the default project, switching semantics.
+ * The SharedPreferences shell of [ProjectStore] runs the real persistence behaviour against a stub ([InMemoryPrefs]).
  */
 class ProjectLogicTest {
 
@@ -34,7 +34,7 @@ class ProjectLogicTest {
     @Test
     fun `store round-trips projects and current pointer`() {
         val store = ProjectStore(InMemoryPrefs())
-        // 默认项目在 init 时自动创建
+        // the default project is created automatically at init
         assertTrue(store.byId(ProjectLogic.DEFAULT_PROJECT_ID) != null)
         val created = store.create("项目1").getOrThrow()
         assertEquals(ProjectLogic.DEFAULT_PROJECT_ID, store.currentId())
@@ -42,7 +42,7 @@ class ProjectLogicTest {
         assertTrue(store.switchTo(created.id))
         assertEquals(created.id, store.currentId())
 
-        // 切到不存在的项目：显式失败，指针不动（P2）
+        // switching to a project that does not exist: explicit failure, the pointer does not move (P2)
         assertFalse(store.switchTo("nope"))
         assertEquals(created.id, store.currentId())
     }
@@ -50,7 +50,7 @@ class ProjectLogicTest {
     @Test
     fun `stale current pointer falls back to default project`() {
         val store = ProjectStore(InMemoryPrefs())
-        // 模拟外部把当前项目指针指向不存在的 id
+        // simulate an outsider aiming the current-project pointer at an id that does not exist
         val prefsField = store.javaClass.getDeclaredField("prefs")
         prefsField.isAccessible = true
         val prefs = prefsField.get(store) as com.yangz3720.simplywork.testsupport.InMemoryPrefs
@@ -63,7 +63,7 @@ class ProjectLogicTest {
         val prefs = com.yangz3720.simplywork.testsupport.InMemoryPrefs()
         prefs.edit().putString("projects", "not json").commit()
         val store = ProjectStore(prefs)
-        // ensureDefault 会在损坏数据上重建默认项目（decode 失败 → 空列表 → 补默认）
+        // ensureDefault rebuilds the default project on corrupt data (decode fails -> empty list -> default re-added)
         assertTrue(store.list().any { it.id == ProjectLogic.DEFAULT_PROJECT_ID })
     }
 
@@ -77,7 +77,7 @@ class ProjectLogicTest {
         assertEquals(listOf(Project("a", "A", 5L)), json.decodeFromString(ListSerializer(Project.serializer()), encoded))
     }
 
-    // ----- 删除项目（v1.6） -----
+    // ----- deleting a project (v1.6) -----
 
     @Test
     fun `delete removes the project and falls a stale current pointer back to default`() {
@@ -89,7 +89,7 @@ class ProjectLogicTest {
 
         assertTrue(store.byId(created.id) == null)
         assertFalse(store.list().any { it.id == created.id })
-        // 删的正是当前项目：指针必须回落默认，不能悬空（见 currentId）
+        // the current project is the one being deleted: the pointer must fall back to the default, never dangle (see currentId)
         assertEquals(ProjectLogic.DEFAULT_PROJECT_ID, store.currentId())
     }
 
@@ -112,7 +112,7 @@ class ProjectLogicTest {
 
         assertTrue(store.delete(ProjectLogic.DEFAULT_PROJECT_ID).isFailure)
         assertTrue(store.delete("ghost").isFailure)
-        // 拒绝不能是"删了再说"：默认项目必须还在
+        // a refusal must not be "delete first, talk later": the default project has to still be there
         assertTrue(store.byId(ProjectLogic.DEFAULT_PROJECT_ID) != null)
         assertEquals(ProjectLogic.DEFAULT_PROJECT_ID, store.currentId())
     }
@@ -124,7 +124,7 @@ class ProjectLogicTest {
 
         ProjectStore(prefs).delete(created.id).getOrThrow()
 
-        // 换一个实例（= 重启后）读同一份 prefs：删掉的不能复活
+        // a fresh instance (i.e. after a restart) reading the same prefs: what was deleted must not come back
         assertFalse(ProjectStore(prefs).list().any { it.id == created.id })
     }
 }

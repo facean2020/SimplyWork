@@ -57,9 +57,9 @@ import java.util.Locale
 import kotlinx.coroutines.launch
 
 /**
- * 主对话视窗（architecture.md `AgentConversationScreen`，UI 阶段实现）：
- * 单列对话流 + ChatGPT 式会话抽屉 + 底部输入条 + Q1 审批弹窗 + 待办面板。
- * v1 非流式：对话投影以持久化事实为准整帧刷新。
+ * Main conversation viewport (architecture.md `AgentConversationScreen`, implemented in the UI stage):
+ * single-column conversation stream + ChatGPT-style session drawer + bottom input bar + Q1 approval dialog + todo panel.
+ * v1 is non-streaming: the conversation projection refreshes as a whole frame, keyed off persisted facts.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -73,7 +73,7 @@ fun AgentScreen(
 
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
-    // MSAL 的交互式登录需要一个 Activity 来拉起授权页；Compose 侧从这里取。
+    // MSAL's interactive sign-in needs an Activity to launch the authorization page; the Compose side reads it from here.
     val activity = LocalActivity.current
     var draft by remember { mutableStateOf("") }
     var showTodos by remember { mutableStateOf(false) }
@@ -89,7 +89,7 @@ fun AgentScreen(
         else -> "选择模型"
     }
 
-    // 长按历史提问 → 进入编辑（预填原文）；发送后开启新分支（旧分支保留可切换）。
+    // Long-press a past user prompt -> enter edit mode (pre-filled with the original text); sending opens a new branch (the old branch is kept and switchable).
     val startEdit: (UiMessage) -> Unit = { message ->
         if (!state.running) {
             editingMessage = message
@@ -111,7 +111,7 @@ fun AgentScreen(
         drawerState = drawerState,
         drawerContent = {
             ModalDrawerSheet(drawerContainerColor = MaterialTheme.colorScheme.background) {
-                // v1.3 项目区：当前项目 + 切换/新建入口（会话列表已按项目过滤）。
+                // v1.3 project area: current project + switch/create entry points (the session list is already filtered by project).
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -147,7 +147,7 @@ fun AgentScreen(
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                // v1.5 项目文件：当前项目沙箱的只读浏览入口。缩进到项目名下方，读作项目的子动作。
+                // v1.5 project files: the read-only browsing entry point for the current project's sandbox. Indented under the project name so it reads as a sub-action of the project.
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -190,8 +190,8 @@ fun AgentScreen(
         Scaffold(
             topBar = {
                 TopAppBar(
-                    // Gemini/ChatGPT 式模型选择 chip：上行会话名，下行当前服务商·模型（点按弹层切换）。
-                    // 会话名只在会话已落库时才有，新对话不占那一行（原先这里顶着一个 App 名占位）。
+                    // Gemini/ChatGPT-style model picker chip: top row is the session name, bottom row is the current provider + model (tapping opens the sheet to switch).
+                    // The session name only exists once the session has been persisted; a new conversation does not occupy that row (this used to be filled by an App-name placeholder).
                     title = {
                         Column(
                             modifier = Modifier.clickable { showModelPicker = true }
@@ -256,9 +256,9 @@ fun AgentScreen(
                 )
             }
         ) { innerPadding ->
-            // 会话流占满剩余高度，底部「新增文件」卡片（v1.5）钉在输入条正上方 ——
-            // 放 content 区而不是 bottomBar：输入条自带 imePadding，再叠一层会把卡片
-            // 顶到键盘后面；放这里键盘弹起时它跟着内容区一起被压缩，永远可见。
+            // The conversation stream fills the remaining height, and the "new files" card (v1.5) at the bottom is pinned directly above the input bar --
+            // it lives in the content area rather than the bottomBar: the input bar brings its own imePadding, and stacking another layer would push the card
+            // behind the keyboard; placed here, it gets compressed along with the content area when the keyboard comes up, so it is always visible.
             Column(modifier = Modifier.padding(innerPadding).fillMaxWidth()) {
                 Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                     if (state.messages.isEmpty()) {
@@ -284,7 +284,7 @@ fun AgentScreen(
         }
     }
 
-    // Q1：HITL 审批弹窗 —— 关闭弹窗（返回/点外部）按"拒绝"处理，安全默认。
+    // Q1: HITL approval dialog -- dismissing it (back gesture / tapping outside) counts as "deny", the safe default.
     approval?.let { request ->
         ApprovalDialog(
             request = request,
@@ -293,7 +293,7 @@ fun AgentScreen(
         )
     }
 
-    // 待办（State Memory 投影）
+    // Todos (the projection of State Memory)
     if (showTodos) {
         ModalBottomSheet(
             onDismissRequest = { showTodos = false },
@@ -303,7 +303,7 @@ fun AgentScreen(
         }
     }
 
-    // 顶栏模型选择弹层（Copilot 式聚焦列表：汇总已配置服务商模型，选择即切换服务商+模型）
+    // Top-bar model picker sheet (Copilot-style focused list: aggregates the configured providers' models, and selecting one switches provider + model)
     if (showModelPicker) {
         ModelPickerSheet(
             accounts = state.providerAccounts,
@@ -315,7 +315,7 @@ fun AgentScreen(
         )
     }
 
-    // v1.3 项目切换/新建弹层（从会话抽屉进入）。
+    // v1.3 project switch/create sheet (entered from the session drawer).
     if (showProjects) {
         ProjectSheet(
             projects = state.projects,
@@ -327,7 +327,7 @@ fun AgentScreen(
             },
             onCreate = { viewModel.createProject(it) },
             onOpenOneDrive = { project ->
-                // 两个 ModalBottomSheet 不能同时常驻：先收起项目弹层再开云端弹层。
+                // Two ModalBottomSheets cannot be resident at the same time: collapse the project sheet first, then open the cloud sheet.
                 showProjects = false
                 oneDriveTarget = project
             },
@@ -336,7 +336,7 @@ fun AgentScreen(
         )
     }
 
-    // v1.4 OneDrive 绑定面板；project 每帧从最新列表解析，绑定完成即时反映状态。
+    // v1.4 OneDrive binding panel; project is re-resolved from the latest list every frame, so a completed binding is reflected in the state immediately.
     oneDriveTarget?.let { target ->
         val project = state.projects.firstOrNull { it.id == target.id } ?: target
         OneDriveSheet(
@@ -362,7 +362,7 @@ fun AgentScreen(
     }
 }
 
-// ----- 会话抽屉（ChatGPT 式列表） -----
+// ----- Session drawer (ChatGPT-style list) -----
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable

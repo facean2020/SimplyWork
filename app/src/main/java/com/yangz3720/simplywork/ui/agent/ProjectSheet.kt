@@ -35,14 +35,14 @@ import com.yangz3720.simplywork.core.session.Project
 import com.yangz3720.simplywork.core.session.ProjectLogic
 
 /**
- * 项目切换/新建弹层（v1.3，参考 Qwen Studio 建档）：列项目（当前项打勾）、
- * 点选切换、底部输入新建。新建不切换当前项目（与 agent 工具语义一致）。
+ * Project switch/create sheet (v1.3, modelled on Qwen Studio's project setup): lists projects (the current one ticked),
+ * tap to switch, type at the bottom to create. Creating does not switch the current project (consistent with the agent tool semantics).
  *
- * v1.4：每行右侧多一个云端入口（[onOpenOneDrive]），文案随绑定状态变化 ——
- * 用文字而不是新增图标，避免为了一个状态再引一套图标依赖。
+ * v1.4: each row gains a cloud entry point on the right ([onOpenOneDrive]), and its label changes with the binding state --
+ * text rather than an added icon, so we do not pull in a whole set of icon dependencies for one state.
  *
- * v1.6：长按行 → 确认后删除项目（[onDelete]）。默认项目只弹告知、不给删除按钮
- * （它是历史会话的兜底归属，见 [ProjectLogic.DEFAULT_PROJECT_ID]）。
+ * v1.6: long-press a row -> delete the project after confirmation ([onDelete]). The default project only gets a notice, with no delete button
+ * (it is the fallback owner of historical sessions, see [ProjectLogic.DEFAULT_PROJECT_ID]).
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable

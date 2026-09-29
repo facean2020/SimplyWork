@@ -42,7 +42,7 @@ class TimeCalculationTest {
         assertTrue(shift.deltaMs < 0)
     }
 
-    /** "下周五" from Wednesday lands on the Friday two days later. */
+    /** The Chinese phrase for "next Friday" from Wednesday lands on the Friday two days later. */
     @Test
     fun testWeekdaySnapMovesForwardToNextOccurrence() {
         val shift = resolve(TimeCalcSpec(weekday = Weekday.FRIDAY))
@@ -52,7 +52,7 @@ class TimeCalculationTest {
 
     /**
      * The snap is *strictly* forward: asking for FRIDAY while already on Friday must land on
-     * next week, which is what "下周五" means. "This Friday" is expressible without the field.
+     * next week, which is what the Chinese "next Friday" phrase means. "This Friday" is expressible without the field.
      */
     @Test
     fun testWeekdaySnapNeverReturnsTheSameDay() {

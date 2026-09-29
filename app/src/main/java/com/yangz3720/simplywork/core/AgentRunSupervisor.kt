@@ -17,11 +17,12 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
- * 运行状态的唯一事实来源（UI 与前台服务共用）。
+ * The single source of truth for run state (shared by the UI and the foreground service).
  *
- * [contextPromptTokens] 不在其中：那是"最近一轮请求真正送进去的上下文"，UI 从
- * [AgentStepEvent.ModelTurn] 自行投影，复位时机（换会话）也由 UI 决定，放这里会与
- * UI 的显式清零互相覆盖。
+ * [contextPromptTokens] is not part of it: that is "the context the most recent turn actually sent
+ * in", which the UI projects for itself from [AgentStepEvent.ModelTurn]; the reset point (switching
+ * session) is the UI's call too, and keeping it here would overwrite back and forth with the UI's
+ * explicit clearing.
  */
 data class RunState(
     val sessionId: String? = null,
@@ -30,22 +31,24 @@ data class RunState(
 )
 
 /**
- * 进程级运行驱动（v1.6）：把 Agent Loop 的执行权从 `viewModelScope` 里搬出来。
+ * Process-level run driver (v1.6): moves ownership of Agent Loop execution out of `viewModelScope`.
  *
- * 为什么必须搬：`AgentLoopCoordinator.run` 是冷 Flow，谁 collect 谁就持有它 ——
- * 之前是 `AgentViewModel` 的 `viewModelScope`，于是 Activity 一销毁（或被系统回收）
- * run 就断，前台服务也就无从保活（服务活着、run 已经死了）。搬到这里之后：
- * 驱动归 app 进程，[AgentRunService] 只负责把进程钉在前台，UI 退化成订阅者。
+ * Why it had to move: `AgentLoopCoordinator.run` is a cold Flow, so whoever collects it holds it --
+ * that used to be `AgentViewModel`'s `viewModelScope`, so the moment the Activity was destroyed (or
+ * reclaimed by the system) the run broke off and the foreground service had nothing to keep alive
+ * (the service alive, the run already dead). After the move: driving belongs to the app process,
+ * [AgentRunService] only pins the process in the foreground, and the UI degrades to a subscriber.
  *
- * 不持任何 Android 依赖（前台服务的启停经构造注入的回调），所以整类可在 JVM 上直接测。
+ * Holds no Android dependency (starting and stopping the foreground service goes through
+ * constructor-injected callbacks), so the whole class is directly testable on the JVM.
  */
 class AgentRunSupervisor(
     private val scope: CoroutineScope,
     private val runtime: () -> AgentRuntime?,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
-    /** run 真正开始前触发（AppContainer 用它拉起前台服务）。 */
+    /** Fires just before the run really starts (AppContainer uses it to bring up the foreground service). */
     private val onRunStarted: (String) -> Unit = {},
-    /** run 结束（完成/失败/被取消）后触发，用于收掉前台服务。 */
+    /** Fires after the run ends (completed / failed / cancelled), used to take the foreground service down. */
     private val onRunStopped: () -> Unit = {}
 ) {
 
@@ -53,9 +56,10 @@ class AgentRunSupervisor(
     val state: StateFlow<RunState> = _state.asStateFlow()
 
     /**
-     * UI 投影信号：原样转发循环事件，让 UI 自己决定刷新什么（会话重投影 / 待办 /
-     * 会话列表）。没有订阅者时事件自然丢弃 —— 事实都在 SessionRepository 里，
-     * 重新订阅后靠重投影拿回来，不依赖事件本身。
+     * UI projection signal: forwards loop events verbatim so the UI decides for itself what to
+     * refresh (session re-projection / todos / session list). With no subscriber the events are
+     * simply dropped -- the facts all live in SessionRepository, so after re-subscribing they come
+     * back via re-projection and nothing depends on the events themselves.
      */
     private val _events = MutableSharedFlow<AgentStepEvent>(extraBufferCapacity = 64)
     val events: SharedFlow<AgentStepEvent> = _events.asSharedFlow()
@@ -63,22 +67,25 @@ class AgentRunSupervisor(
     private var job: Job? = null
 
     /**
-     * 递增的代次：取消旧 run 后，它的收尾回调会带着过期代次返回，据此丢弃 ——
-     * 否则旧 run 的 `running = false` 会盖掉刚启动的新 run（两处都是 `_state.update`）。
+     * Incrementing generation: after an old run is cancelled its teardown callback comes back
+     * carrying a stale generation, which is how it gets dropped -- otherwise the old run's
+     * `running = false` would overwrite the new run that just started (both are `_state.update`).
      */
     private var generation = 0
 
     /**
-     * 单任务假设（与旧 `runJob?.cancel()` 同义）：已有 run 在跑时先取消，再启动新的。
-     * 模型未配置（[runtime] 为 null）时是 no-op，调用方负责给出"未配置"提示。
+     * Single-task assumption (equivalent to the old `runJob?.cancel()`): when a run is already
+     * going, cancel it first and then start the new one. A no-op when the model is unconfigured
+     * ([runtime] is null); the caller owns showing the "not configured" message.
      */
     fun start(sessionId: String, initialPrompt: String?) {
         val runtime = runtime() ?: return
         cancelCurrent()
         val token = ++generation
         _state.value = RunState(sessionId = sessionId, running = true)
-        // 先拉起前台服务再启动循环：服务必须在进程被降到后台之前进入前台。
-        // 循环本身在 dispatcher 上排队，不会抢在这行之前跑（见 dispatcher 缺省 Dispatchers.IO）。
+        // Bring up the foreground service before starting the loop: the service must be in the
+        // foreground before the process gets demoted to background. The loop itself queues on the
+        // dispatcher, so it cannot jump ahead of this line (see the dispatcher default Dispatchers.IO).
         onRunStarted(sessionId)
         job = scope.launch(dispatcher) {
             try {
@@ -88,15 +95,16 @@ class AgentRunSupervisor(
                 finish(token)
                 throw e
             } catch (e: Exception) {
-                // 循环把 LLM 失败/超时都收编成 AgentStepEvent.Failed（不抛出），走到这里的是
-                // 装配层异常（如会话不存在）—— 仍然要让服务收掉，否则通知会永远挂着。
+                // The loop pulls LLM failures/timeouts in as AgentStepEvent.Failed (it does not
+                // throw); what arrives here is a wiring-layer exception (e.g. no such session) --
+                // the service still has to be taken down, otherwise the notification hangs forever.
                 _events.tryEmit(AgentStepEvent.Failed(sessionId, e))
                 finish(token)
             }
         }
     }
 
-    /** 用户中止：已落库节点保留，pending 节点由下次 run 清扫。 */
+    /** User abort: nodes already persisted are kept, pending nodes are swept by the next run. */
     fun stop() {
         val wasRunning = job != null
         cancelCurrent()
@@ -104,7 +112,7 @@ class AgentRunSupervisor(
         if (wasRunning) onRunStopped()
     }
 
-    /** 运行中输入（design §6 节点 B）：下一步循环 drain 时生效。 */
+    /** Mid-run input (design §6 node B): takes effect when the loop drains at the next step. */
     fun steer(text: String) {
         runtime()?.queue?.enqueue(IncomingMessage.Steer(text))
     }

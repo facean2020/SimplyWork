@@ -147,7 +147,7 @@ class SqliteSessionStore(context: Context, databaseName: String = "agent_session
 
     override fun deleteSession(sessionId: String) {
         val db = writableDatabase
-        // 三张表必须一起消失：留一行悬空 node 会让"会话已删"变成半个事实。
+        // All three tables must disappear together: leaving one dangling node row turns "session deleted" into half a fact.
         db.beginTransaction()
         try {
             db.execSQL("DELETE FROM nodes WHERE session_id = ?", arrayOf(sessionId))

@@ -28,12 +28,14 @@ class RegisteredTool(
     /** Optional per-instance danger refinement (e.g. calendar DIRECT_WRITE → USER_CONFIRMING). */
     val instanceDangerLevel: ((parsed: Any?) -> DangerLevel)? = null,
     /**
-     * v1.1：这次调用会**不可逆**地改动或删除用户数据。
+     * v1.1: this call will **irreversibly** change or delete user data.
      *
-     * 与 [dangerLevel] 正交，刻意不合并：[dangerLevel] 回答"要不要让用户知情"（读位置、
-     * 查日历也算 USER_CONFIRMING），而这个标志回答"自动批准能不能免掉它"。删除类调用即使
-     * 在自动批准下也必须留下人的一拍，所以它需要一个单独的、不会被粗分级抹平的标记；
-     * 也不把已按设计移除的 HIGH_RISK 等级加回来（见 OperationSpec.kt 的 v1.1 说明）。
+     * Orthogonal to [dangerLevel], deliberately not merged: [dangerLevel] answers "should the
+     * user be told" (reading location or querying the calendar also counts as USER_CONFIRMING),
+     * whereas this flag answers "can auto-approval waive it". A delete-style call must still
+     * leave the human a beat even under auto-approval, so it needs its own marker that a coarse
+     * grading cannot flatten away; and we do not add back the HIGH_RISK level that was removed
+     * by design (see the v1.1 note in OperationSpec.kt).
      */
     val destructive: Boolean = false
 ) {

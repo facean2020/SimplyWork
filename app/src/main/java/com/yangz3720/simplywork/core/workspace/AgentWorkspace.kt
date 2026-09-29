@@ -3,47 +3,47 @@ package com.yangz3720.simplywork.core.workspace
 import java.io.File
 
 /**
- * Agent 内部沙箱（v1.3）：模拟 PC 的"可操作目录"。每个项目一个独立目录
- * （`<root>/<projectId>/…`），agent 的 `fs_*` 工具全部落在这里 —— 对应
- * `appcontainer → \项目1 \项目2` 的语义（用户定调）。
+ * Agent-internal sandbox (v1.3): models the PC's "operable directory". One separate directory per
+ * project (`<root>/<projectId>/…`), and every `fs_*` tool of the agent lands here -- matching the
+ * `appcontainer → \Project1 \Project2` semantics (user-mandated).
  *
- * 纯 Kotlin + [root] 注入 → JVM 可测。路径安全是硬约束：
- * 1. projectId 必须匹配 [ProjectIdRules]，绝不允许 `.` / `..` / 路径分隔符；
- * 2. 相对路径 canonical 化后必须仍落在项目目录内 —— `../` 逃逸、绝对路径、
- *    符号链接跳出一律显式拒绝（P2），绝不静默改写到别处。
+ * Pure Kotlin + injected [root] → testable on the JVM. Path safety is a hard constraint:
+ * 1. projectId must match [ProjectIdRules] -- `.` / `..` / path separators are never allowed;
+ * 2. after canonicalization the relative path must still land inside the project directory -- `../` escapes, absolute paths and
+ *    symlink hops are all explicitly refused (P2), never silently rewritten somewhere else.
  *
- * 这是**应用私有目录**（`context.filesDir` 下），不需要任何 Android 权限；
- * App 操作自己是天然允许的，边界只在不要越过自己的沙盒（这正是本类的职责）。
+ * This is an **app-private directory** (under `context.filesDir`), so no Android permission is needed;
+ * an app operating on itself is naturally allowed, and the only boundary is not overstepping its own sandbox (exactly what this class is for).
  */
 class AgentWorkspace(private val root: File) {
 
-    /** 单文件上限：读侧截断、写侧拒绝。上下文预算 8k 字符，256KB 已经远超所需。 */
+    /** Per-file limit: the read side truncates, the write side refuses. The context budget is 8k chars, so 256KB is already far beyond what is needed. */
     var maxFileBytes: Int = 256 * 1024
 
-    /** 单次列目录上限（防把巨型目录整表喂给模型）。 */
+    /** Per-listing entry cap (stops a huge directory being fed to the model as one full table). */
     var maxListEntries: Int = 500
 
-    /** 每项目的根目录（自动创建）。 */
+    /** Root directory of each project (created automatically). */
     fun projectDir(projectId: String): File {
         require(ProjectIdRegex.matches(projectId)) { "invalid project id: '$projectId'" }
         return File(root, projectId).apply { mkdirs() }
     }
 
     /**
-     * 删除整个项目目录（项目被删除时，UI 走这条清空沙箱）。
+     * Deletes the whole project directory (the UI takes this path to clear the sandbox when a project is deleted).
      *
-     * 刻意不走 [projectDir]：那个方法会先 `mkdirs()`，等于为了删一个不存在的目录
-     * 先把它建出来。
+     * Deliberately does not go through [projectDir]: that method calls `mkdirs()` first, which amounts to creating a
+     * nonexistent directory just so it can be deleted.
      *
-     * @return 调用之后目录是否确实不在了 —— 本就不存在也是 true（"删完了"的语义，
-     * 不做"到底删没删"的区分：调用方只关心它现在不在）。
+     * @return whether the directory is really gone after the call -- also true when it never existed (the "it is deleted" semantics,
+     * with no distinction of "was there anything to delete": callers only care that it is not there now).
      */
     fun deleteProject(projectId: String): Boolean {
         require(ProjectIdRegex.matches(projectId)) { "invalid project id: '$projectId'" }
         return File(root, projectId).deleteRecursively()
     }
 
-    // ----- 查询 -----
+    // ----- Queries -----
 
     data class Entry(val name: String, val isDirectory: Boolean, val sizeBytes: Long, val modifiedAtMs: Long)
 
@@ -65,7 +65,7 @@ class AgentWorkspace(private val root: File) {
     fun read(projectId: String, relativePath: String): FileContent {
         val file = resolve(projectId, relativePath, what = "a regular file") { it.isFile }
         val raw = file.readBytes()
-        // 多出来的字节丢弃但必须声明：静默截断会让模型以为读全了（P2）。
+        // Extra bytes are dropped but must be declared: silent truncation would make the model believe it read everything (P2).
         val bytes = if (raw.size > maxFileBytes) raw.copyOf(maxFileBytes) else raw
         return FileContent(
             path = relativePath,
@@ -76,26 +76,26 @@ class AgentWorkspace(private val root: File) {
     }
 
     /**
-     * 读文本、失败即 `null`（v1.5 改动记录的**基线**读取用）：写入前"文件原来是什么"，
-     * 文件不存在是再正常不过的情况，不该抛。超 [maxFileBytes] 的截断由 [FileContent.truncated]
-     * 如实报告，调用方自己决定这份基线可不可信。
+     * Reads text, returns `null` on failure (used for the **baseline** read of the v1.5 change log): "what the file was" before a
+     * write, and a missing file is a perfectly normal case that must not throw. Truncation beyond [maxFileBytes] is reported
+     * faithfully by [FileContent.truncated], and the caller decides for itself whether that baseline can be trusted.
      */
     fun readOrNull(projectId: String, relativePath: String): FileContent? =
         runCatching { read(projectId, relativePath) }.getOrNull()
 
-    // ----- 变更（SAFE 级：写/建目录自由；移动/删除由工具层升级为 USER_VISIBLE/CONFIRMING）-----
+    // ----- Mutations (SAFE level: writes/mkdir are free; move/delete are escalated to USER_VISIBLE/CONFIRMING by the tool layer) -----
 
     data class WriteResult(val path: String, val bytesWritten: Long, val totalBytes: Long, val created: Boolean)
 
     /**
-     * 二进制读（v1.4 云端镜像同步用）。与 [read] 共用同一套路径安全校验，但**不施加**
-     * [maxFileBytes] 上限 —— 那个上限保护的是模型上下文预算，不是磁盘。镜像必须字节保真，
-     * 按文本截断或解码会静默损坏文件。
+     * Binary read (used by v1.4 cloud mirror sync). Shares the same path-safety checks as [read] but does **not** impose
+     * the [maxFileBytes] limit -- that limit protects the model's context budget, not the disk. A mirror must be byte-faithful;
+     * truncating or decoding it as text would silently corrupt files.
      */
     fun readBytes(projectId: String, relativePath: String): ByteArray =
         resolve(projectId, relativePath, what = "a regular file") { it.isFile }.readBytes()
 
-    /** 二进制写；语义同 [write] 但不做大小上限（理由同 [readBytes]）。 */
+    /** Binary write; same semantics as [write] but with no size cap (same reasoning as [readBytes]). */
     fun writeBytes(projectId: String, relativePath: String, bytes: ByteArray): WriteResult {
         val file = resolveForWrite(projectId, relativePath)
         if (file.isDirectory) {
@@ -107,7 +107,7 @@ class AgentWorkspace(private val root: File) {
         return WriteResult(path = relativePath, bytesWritten = bytes.size.toLong(), totalBytes = file.length(), created = !existed)
     }
 
-    /** 写文件；父目录自动创建（mkdir -p 语义），[append] 缺省为覆盖。 */
+    /** Writes a file; parent directories are created automatically (mkdir -p semantics); [append] defaults to overwrite. */
     fun write(projectId: String, relativePath: String, content: String, append: Boolean = false): WriteResult {
         require(content.encodeToByteArray().size <= maxFileBytes) {
             "content exceeds the ${maxFileBytes}-byte per-file limit (${content.encodeToByteArray().size} bytes); split it into multiple writes"
@@ -148,7 +148,7 @@ class AgentWorkspace(private val root: File) {
 
     data class MoveResult(val from: String, val to: String)
 
-    /** 目标已存在时显式拒绝（不静默覆盖 —— PC mv 的 -n 语义，P2）。 */
+    /** Refuses explicitly when the target already exists (no silent overwrite -- PC `mv -n` semantics, P2). */
     fun move(projectId: String, fromPath: String, toPath: String): MoveResult {
         val from = resolve(projectId, fromPath, what = "present") { it.exists() }
         val to = resolveForWrite(projectId, toPath)
@@ -164,8 +164,8 @@ class AgentWorkspace(private val root: File) {
     data class DeleteResult(val path: String, val deletedEntries: Int)
 
     /**
-     * 删除文件或目录。项目根目录本身不可删（删掉等于注销项目的沙箱，工具语义里
-     * 项目删除根本不存在）；目录必须显式 `recursive=true`，否则只允许空目录。
+     * Deletes a file or directory. The project root itself cannot be deleted (deleting it would be deregistering the project's sandbox,
+     * which simply does not exist in the tool semantics); a directory requires an explicit `recursive=true`, otherwise only an empty one is allowed.
      */
     fun delete(projectId: String, relativePath: String, recursive: Boolean = false): DeleteResult {
         if (relativePath.isBlank()) {
@@ -203,12 +203,12 @@ class AgentWorkspace(private val root: File) {
         return DeleteResult(path = relativePath, deletedEntries = count)
     }
 
-    // ----- 路径安全 -----
+    // ----- Path safety -----
 
     /**
-     * 解析并检查 [relativePath] 仍落在项目目录内。canonical 化同时消解 `..` 与符号
-     * 链接；逃逸 → [WorkspaceException]（显式拒绝，绝不改写到沙箱外）。
-     * [what] 是 [predicate] 失败时的可读语义（"a directory" / "a regular file" / "present"）。
+     * Resolves [relativePath] and checks that it still lands inside the project directory. Canonicalization dissolves both `..` and symbolic
+     * links; an escape → [WorkspaceException] (explicit refusal, never rewritten outside the sandbox).
+     * [what] is the readable semantics used when [predicate] fails ("a directory" / "a regular file" / "present").
      */
     private fun resolve(
         projectId: String,
@@ -226,12 +226,12 @@ class AgentWorkspace(private val root: File) {
         return target
     }
 
-    /** 写/移动目标：允许不存在，但解析后必须仍在沙箱内（mkdirs 前先验）。 */
+    /** Write/move target: may not exist, but after resolution it must still be inside the sandbox (verified before mkdirs). */
     private fun resolveForWrite(projectId: String, relativePath: String): File {
         require(relativePath.isNotBlank()) { "path must not be empty" }
         require(!relativePath.startsWith("/")) { "paths inside the workspace are relative; got an absolute path: '$relativePath'" }
-        // base 必须 canonical：否则 macOS 的 /var → /private/var 符号链接会让每个合法
-        // 相对路径都"逃逸"（target 是 canonical 的，base 不是）。
+        // base must be canonical: otherwise macOS's /var → /private/var symlink makes every legitimate
+        // relative path look like it "escapes" (target is canonical, base is not).
         val base = projectDir(projectId).canonicalFile
         val target = File(base, relativePath).canonicalFile
         if (!target.path.startsWith(base.path + File.separator)) {
@@ -245,5 +245,5 @@ class AgentWorkspace(private val root: File) {
     }
 }
 
-/** 归一化的沙箱操作失败：工具层转 JSON 错误对象，模型可自纠（P2）。 */
+/** Normalized sandbox operation failure: the tool layer turns it into a JSON error object so the model can self-correct (P2). */
 class WorkspaceException(message: String) : Exception(message)

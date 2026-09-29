@@ -1,8 +1,8 @@
 package com.yangz3720.simplywork.core.workspace
 
 /**
- * 文件类型判定（纯函数）：预览要决定"Markdown 渲染 / 纯文本 / 不预览"。
- * 只看扩展名 —— 二进制判定交给内容里的 NUL 字节（那比扩展名白名单可靠得多）。
+ * File kind decisions (pure functions): preview must decide "Markdown rendering / plain text / no preview".
+ * Extensions only -- binary detection is left to NUL bytes in the content (far more reliable than an extension allowlist).
  */
 object FileKinds {
 

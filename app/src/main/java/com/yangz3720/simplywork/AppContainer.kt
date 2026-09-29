@@ -9,7 +9,10 @@ import com.yangz3720.simplywork.core.agent.AgentConfig
 import com.yangz3720.simplywork.core.agent.AuditApprovalHandler
 import com.yangz3720.simplywork.core.agent.ContextBudget
 import com.yangz3720.simplywork.core.agent.ContextBudgetPlan
+import com.yangz3720.simplywork.core.agent.IncomingMessage
+import com.yangz3720.simplywork.core.agent.ScriptJobRegistry
 import com.yangz3720.simplywork.core.agent.tool.AgentSelfConfig
+import com.yangz3720.simplywork.core.agent.tool.ScriptTools
 import com.yangz3720.simplywork.core.agent.tool.SelfOpsTools
 import com.yangz3720.simplywork.core.cloud.OneDriveOwner
 import com.yangz3720.simplywork.core.session.ProjectStore
@@ -24,6 +27,7 @@ import com.yangz3720.simplywork.infrastructure.model.ModelProvider
 import com.yangz3720.simplywork.infrastructure.model.client.OpenAiCompatibleClient
 import com.yangz3720.simplywork.infrastructure.model.config.ModelConfig
 import com.yangz3720.simplywork.infrastructure.model.config.ProviderAccount
+import com.yangz3720.simplywork.infrastructure.sandbox.engine.QuickJsSandbox
 import com.yangz3720.simplywork.infrastructure.systemops.SystemCapabilityProbeImpl
 import com.yangz3720.simplywork.infrastructure.systemops.SystemOperationRouter
 import com.yangz3720.simplywork.infrastructure.systemops.SystemOperationRouterImpl
@@ -41,17 +45,19 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 
 /**
- * Composition root for the app（UI 阶段）：owns [ProviderKeyring]（多服务商密钥 + 当前
- * 选择）持久化、共享 systemops 装配、[ApprovalCoordinator]（Q1 HITL 缝）与生产
- * [AgentRuntime]。
+ * Composition root for the app (UI stage): owns [ProviderKeyring] (multiple provider keys + current
+ * selection) persistence, shared systemops wiring, [ApprovalCoordinator] (Q1 HITL seam) and the
+ * production [AgentRuntime].
  *
- * 实现 [AgentRuntimeOwner] 供 ViewModel 消费。重建语义：keyring 变更影响当前选中的
- * provider/model/timeout 时重建运行时；旧运行时中被取消/进行中的 run 持有其捕获的引用
- * 自然终止——调用方保证仅在空闲时触发重建。
+ * Implements [AgentRuntimeOwner] for ViewModel consumption. Rebuild semantics: rebuild the runtime
+ * when a keyring change affects the currently selected provider/model/timeout; runs that are
+ * cancelled/in-flight in the old runtime hold the reference they captured and terminate naturally
+ * -- the caller guarantees that a rebuild is only triggered while idle.
  */
 class AppContainer(context: Context) : AgentRuntimeOwner {
 
@@ -60,41 +66,43 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
         appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val keyring = ProviderKeyring(prefs)
 
-    /** HITL 审批协调器（Q1）：UI 弹窗决策经此回灌审计门禁。 */
+    /** HITL approval coordinator (Q1): UI dialog decisions are fed back through here to the audit gate. */
     val approvalCoordinator = ApprovalCoordinator()
 
-    /** 运行时权限协调器（v1.2 / P4）：系统授权结果经此回灌 systemops 执行器。 */
+    /** Runtime permission coordinator (v1.2 / P4): system grant results are fed back through here to the systemops executor. */
     val permissionCoordinator = PermissionCoordinator()
 
-    /** 项目注册表（v1.3）：项目 = 会话归属 + 沙箱工作空间目录。 */
+    /** Project registry (v1.3): a project = session ownership + sandbox workspace directory. */
     val projectStore = ProjectStore(prefs)
 
-    /** Agent 沙箱根：每个项目一个子目录（`agent_workspace/projects/<projectId>/`）。 */
+    /** Agent sandbox root: one subdirectory per project (`agent_workspace/projects/<projectId>/`). */
     private val workspace = AgentWorkspace(
         File(appContext.filesDir, "agent_workspace/projects")
     )
 
     /**
-     * 改动记录（v1.5）：fs_* 每笔改动落一个 JSON 文件（`agent_workspace/changes/<sessionId>.json`）。
-     * 故意**不**进会话 payload store —— 那是喂给模型的原始记录，而差异行只服务 UI，
-     * 不该占上下文预算，也不该让模型看见自己的 diff（它已经有工具结果了）。
+     * Change log (v1.5): each fs_* change persists one JSON file (`agent_workspace/changes/<sessionId>.json`).
+     * Deliberately does **not** go into the session payload store -- that is the raw record fed to the model,
+     * whereas the diff lines only serve the UI, so they should not consume context budget and the model
+     * should not see its own diff (it already has the tool results).
      */
     private val changeLog: FileChangeLog =
         JsonFileChangeLog(File(appContext.filesDir, "agent_workspace/changes"))
 
     /**
-     * 项目文件接缝（v1.5）：只读浏览 / 预览 + 会话改动读取。与 [workspace] 同源，
-     * 所以 UI 看到的目录就是 agent 动手的那个目录。
+     * Project file seam (v1.5): read-only browsing / preview + reading session changes. Same source as
+     * [workspace], so the directory the UI sees is the very directory the agent works in.
      */
     val projectFiles: ProjectFilesOwner by lazy { LocalProjectFiles(workspace, changeLog) }
 
     /**
-     * OneDrive 接入（v1.4）：惰性装配 —— 不做任何网络或 MSAL 初始化，只在 App 启动时
-     * 建对象。真正的登录/同步都由 UI 显式触发（"懒惰同步"的入口控制点）。
+     * OneDrive integration (v1.4): lazy wiring -- no network or MSAL initialization, only object
+     * creation at app startup. Real sign-in/sync is always triggered explicitly by the UI (the entry
+     * control point of "lazy sync").
      */
     val oneDrive: OneDriveOwner by lazy { OneDriveService(appContext, projectStore, workspace) }
 
-    /** 配置自操作缝（v1.3）：agent 的 self_config_read/update 走这里，与 UI 同源。 */
+    /** Config self-operation seam (v1.3): the agent's self_config_read/update goes through here, same source as the UI. */
     private val selfConfig = object : AgentSelfConfig {
 
         override fun snapshot(): AgentSelfConfig.Snapshot {
@@ -108,7 +116,7 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
                         id = it.id,
                         name = it.name,
                         baseUrl = it.baseUrl,
-                        // API Key 本体永不出缝（用户拍板）：模型只见"有没有"。
+                        // The API key itself never crosses the seam (the user's call): the model only sees whether one exists.
                         hasKey = it.apiKey.isNotBlank()
                     )
                 },
@@ -147,8 +155,9 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
                     errors += "unknown projectId '$id' (see self_config_read.projects)"
                 }
             }
-            // Agent 在 run 内改动不能立刻重建 runtime（会换掉运行中的 coordinator）：
-            // keyring 已落盘，重建推迟到 VM 观察到 configChanges 且空闲时。
+            // An agent change made during a run cannot rebuild the runtime immediately (it would swap out
+            // the running coordinator): the keyring is already persisted, so the rebuild is deferred until
+            // the VM observes configChanges while idle.
             return AgentSelfConfig.ApplyResult(
                 applied = applied,
                 rebuildPending = applied.any { !it.startsWith("current project") },
@@ -175,19 +184,51 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
-     * 运行驱动（v1.6）：run 的持有者从 `AgentViewModel.viewModelScope` 搬到这里。
-     * 之前 Activity 一销毁 run 就断，前台服务也就无从保活（服务活着、run 已经死了）；
-     * 现在驱动归进程，[AgentRunService] 只负责把进程钉在前台。
+     * Run driver (v1.6): ownership of runs moved here from `AgentViewModel.viewModelScope`.
+     * Previously a run was cut off as soon as the Activity was destroyed, leaving the foreground service
+     * unable to keep anything alive (the service lived while the run was already dead); now the driver
+     * belongs to the process and [AgentRunService] only pins the process in the foreground.
      *
-     * [runtime] 走 lambda 而不是取值：配置变更会整体换掉 runtime 实例（[rebuildRuntime]），
-     * 每次 start 必须拿到当时最新的那个。
+     * [runtime] is passed as a lambda rather than a value: a config change swaps the runtime instance
+     * wholesale ([rebuildRuntime]), so every start must get the one that is current at that moment.
      */
     val runSupervisor = AgentRunSupervisor(
         scope = appScope,
         runtime = { runtime },
         onRunStarted = { appContext.startForegroundService(Intent(appContext, AgentRunService::class.java)) },
-        onRunStopped = { appContext.stopService(Intent(appContext, AgentRunService::class.java)) }
+        onRunStopped = {
+            appContext.stopService(Intent(appContext, AgentRunService::class.java))
+            // Orphan scripts keep occupying the sandbox's serial execution lock (QuickJsSandbox.execMutex),
+            // blocking every script of the **next** run -- so cancel them while stopping the service.
+            appScope.launch { scriptJobs.cancelAll() }
+        }
     )
+
+    /**
+     * Sandbox + async script jobs (v1.6). The engine is lazily bound: this only creates objects, and only
+     * the first `js_run` connects to the AndroidX JS service process, so startup costs nothing and cold
+     * start is unaffected.
+     */
+    private val scriptJobs: ScriptJobRegistry by lazy {
+        ScriptJobRegistry(
+            scope = appScope,
+            sandbox = QuickJsSandbox(appContext),
+            onFinished = { jobId, sessionId, result ->
+                // Only wake the loop when "the same session is still running". Do not enqueue this notice
+                // once the run has ended -- the queue belongs to the runtime and does not distinguish
+                // sessions, so it would be drained by the next run (which may already be another session).
+                val run = runSupervisor.state.value
+                if (run.running && run.sessionId == sessionId) {
+                    runtime?.queue?.enqueue(
+                        IncomingMessage.FollowUp(
+                            ScriptTools.finishNotice(jobId, result),
+                            REASON_JS_JOB_FINISHED
+                        )
+                    )
+                }
+            }
+        )
+    }
 
     init {
         runtime = KeyringLogic.toModelConfig(keyring.state)?.let(::buildRuntime)
@@ -235,30 +276,32 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
 
     override fun setAutoApproveNonDestructive(enabled: Boolean) {
         mutateKeyring { KeyringLogic.withAutoApprove(it, enabled) }
-        // 门禁把开关持在构造参数里，所以改完必须重建才生效（与超时/选择同一条路径）。
+        // The gate holds the switch in its constructor argument, so a change only takes effect after a rebuild (same path as timeout/selection).
         rebuildRuntime()
     }
 
     /**
-     * 没有选中模型时返回 null，而不是一个"默认 24k"的预算：那时并没有任何请求要发，
-     * 报一个数字会让人以为这个预算是真的在生效（设置页的"未选择模型"分支正为此存在）。
+     * Returns null when no model is selected, rather than a "default 24k" budget: there is no request to
+     * send at that point, and reporting a number would make people believe that budget is actually in
+     * effect (the settings page's "no model selected" branch exists precisely for this).
      */
     override fun contextBudget(): ContextBudgetPlan? =
         if (keyring.state.activeModel.isBlank()) null else contextBudgetPlan()
 
     override fun setContextBudgetOverride(tokens: Int?) {
         mutateKeyring { KeyringLogic.withContextBudgetOverride(it, tokens) }
-        // 预算进了 AgentConfig（压缩阈值 + 工作窗口），同样要重建才生效。
+        // The budget goes into AgentConfig (compaction trigger + working window), so it likewise only takes effect after a rebuild.
         rebuildRuntime()
     }
 
     /**
-     * 按服务商账号拉取模型列表（GET /models）。一次性临时客户端 + IO 线程 +
-     * Throwable 兜底：OkHttp 对非 IOException 会在回调后原样 rethrow 到线程池
-     * （进程级 FATAL），这里统一收编为 Result（取消除外）。
+     * Fetches the model list (GET /models) for a provider account. A one-off throwaway client + IO thread +
+     * Throwable fallback: for non-IOException OkHttp rethrows as-is to the thread pool after the callback
+     * (a process-level FATAL), so everything here is folded into Result (except cancellation).
      *
-     * v1.1：顺手把服务商报来的**上下文长度**记下来。模型列表本来就会为选择器拉一次，
-     * 所以学这个是零额外请求 —— 而上下文预算正需要它（见 [contextBudgetPlan]）。
+     * v1.1: incidentally records the **context length** reported by the provider. The model list is fetched
+     * for the selector anyway, so learning it costs no extra request -- and the context budget needs it
+     * (see [contextBudgetPlan]).
      */
     override suspend fun fetchModels(account: ProviderAccount): Result<List<String>> =
         withContext(Dispatchers.IO) {
@@ -294,13 +337,13 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
             }
         }
 
-    // ----- 内部装配 -----
+    // ----- internal wiring -----
 
-    /** 配置版本：任何 keyring 变更自增；agent 自改配置靠它通知 VM 在空闲时重建。 */
+    /** Config version: incremented on any keyring change; the agent's own config edits use it to tell the VM to rebuild while idle. */
     private val configVersionFlow = MutableStateFlow(0)
     private var builtVersion = 0
 
-    /** 供 VM 观察的配置版本（AgentRuntimeOwner 缝，v1.3）。 */
+    /** Config version for the VM to observe (AgentRuntimeOwner seam, v1.3). */
     override val configVersion: StateFlow<Int> = configVersionFlow.asStateFlow()
 
     private fun mutateKeyring(transform: (KeyringState) -> KeyringState) {
@@ -309,8 +352,9 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
     }
 
     /**
-     * keyring 已改但 runtime 未重建时重建（agent 自改配置后的落地步）。
-     * VM 保证仅在空闲时调用；重复调用是 no-op。
+     * Rebuilds when the keyring has changed but the runtime has not been rebuilt yet (the landing step
+     * after the agent edits its own config). The VM guarantees it is only called while idle; repeated
+     * calls are a no-op.
      */
     override fun rebuildRuntimeIfNeeded() {
         if (builtVersion != configVersionFlow.value) rebuildRuntime()
@@ -341,26 +385,28 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
                     workspace = workspace,
                     projects = projectStore,
                     changes = changeLog
-                )
+                ) + ScriptTools.registeredTools(scriptJobs)
             }
         )
 
     /**
-     * 用户设置 → 循环/门禁参数（v1.1）。集中在这里翻译，别处只认 [AgentConfig] 的语义。
+     * User settings -> loop/gate parameters (v1.1). The translation is centralized here; everywhere else
+     * only understands the semantics of [AgentConfig].
      */
     private fun agentConfig(): AgentConfig {
         val plan = contextBudgetPlan()
         return AgentConfig(
             autoApproveNonDestructive = keyring.state.autoApproveNonDestructive,
-            // 装不下就压；工作窗口跟着预算同比放大（见 ContextBudget 的推导表）。
+            // Compact when it does not fit; the working window scales proportionally with the budget (see ContextBudget's derivation table).
             compactionTriggerTokens = plan.compactionTriggerTokens,
             workingTokenBudget = plan.workingTokenBudget
         )
     }
 
     /**
-     * 当前模型的上下文预算：手动覆盖 > 服务商报的 > 模型名里的规格 > 历史默认。
-     * 裁决本身是纯函数（[ContextBudget.resolve]），这里只负责把三个候选值取出来。
+     * Context budget for the current model: manual override > provider-reported > spec in the model name
+     * > historical default. The arbitration itself is a pure function ([ContextBudget.resolve]); here we
+     * only pull out the three candidate values.
      */
     private fun contextBudgetPlan(): ContextBudgetPlan {
         val state = keyring.state
@@ -378,5 +424,8 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
 
     private companion object {
         const val PREFS_NAME = "simplywork"
+
+        /** Reason for the async script job completion notice (lands in a follow-up node, for events and troubleshooting to identify). */
+        const val REASON_JS_JOB_FINISHED = "js_job_finished"
     }
 }

@@ -7,11 +7,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
 /**
- * 排版：正文 15/1.5（阅读密度优先）；空态欢迎语用衬线（almanac register 的
- * 一个克制的引用）；工具参数与时间戳用 mono。
+ * Typography: body 15/1.5 (reading density first); the empty-state welcome line uses a serif (a
+ * restrained quotation from the almanac register); tool args and timestamps use mono.
  */
 val Typography = Typography(
-    // 空态欢迎语（衬线 display，仅用于一个时刻）
+    // empty-state welcome line (serif display, used for exactly one moment)
     headlineMedium = TextStyle(
         fontFamily = FontFamily.Serif,
         fontWeight = FontWeight.Normal,
@@ -51,7 +51,7 @@ val Typography = Typography(
         lineHeight = 16.sp,
         letterSpacing = 0.3.sp
     ),
-    // 工具参数 / 时间戳
+    // tool args / timestamps
     labelSmall = TextStyle(
         fontFamily = FontFamily.Monospace,
         fontWeight = FontWeight.Normal,

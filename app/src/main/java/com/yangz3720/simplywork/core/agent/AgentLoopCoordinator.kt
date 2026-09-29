@@ -241,7 +241,7 @@ class AgentLoopCoordinator(
     ): Boolean {
         var anyDenied = false
         for (call in response.toolCalls) {
-            // 上下文随调用走（v1.5）：工具要按 toolCallId 把改动挂回这一条条目。
+            // Context travels with the call (v1.5): a tool hangs its change back onto this very entry by toolCallId.
             val context = ToolExecutionContext(sessionId, call.id)
             when (val decision = auditGate.preToolAudit(call)) {
                 is AuditGatePipeline.AuditDecision.Approved -> {

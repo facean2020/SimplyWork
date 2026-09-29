@@ -26,6 +26,17 @@ class QuickJsSandbox(
     private var currentIsolate: JavaScriptIsolate? = null
     private val initMutex = Mutex()
 
+    /**
+     * Execution mutex (v1.6): this class has only one shared isolate, and the way a [execute] timeout is
+     * handled is `isolate.close()` + rebuild -- i.e. **killing the entire isolate**. That means two concurrent
+     * `execute` calls murder each other: as soon as either one times out, the script the other one is running
+     * gets taken down with it (and its future never returns normally again). With the lock, concurrent calls become queueing execution, and the timeout semantics are safe again.
+     *
+     * Lock order is always execMutex -> initMutex; the isolate rebuild inside [execute] goes through the private
+     * [recreateIsolate] instead of the public [reset], otherwise it would deadlock on the same non-reentrant lock.
+     */
+    private val execMutex = Mutex()
+
     override val isInitialized: Boolean get() = currentIsolate != null
 
     private suspend fun ensureInitialized(config: SandboxConfig) {
@@ -64,15 +75,24 @@ class QuickJsSandbox(
         }
     }
 
+    /**
+     * Executes while holding [execMutex]: only one script runs at any moment (see [execMutex]).
+     */
     override suspend fun execute(
         script: String,
         context: Map<String, Any?>,
         config: SandboxConfig
-    ): SandboxResult = withContext(dispatcher) {
+    ): SandboxResult = execMutex.withLock { withContext(dispatcher) { runIsolated(script, context, config) } }
+
+    private suspend fun runIsolated(
+        script: String,
+        context: Map<String, Any?>,
+        config: SandboxConfig
+    ): SandboxResult {
         val startTime = System.currentTimeMillis()
         AgentLogger.d(tag) { "Executing script (timeout=${config.timeoutMs}ms, heap=${config.maxMemoryBytes}B):\n$script" }
 
-        try {
+        return try {
             ensureInitialized(config)
             val isolate = checkNotNull(currentIsolate) { "JavaScript Isolate not available" }
 
@@ -105,10 +125,10 @@ class QuickJsSandbox(
             if (rawResult == null) {
                 AgentLogger.w(tag) { "Script execution exceeded timeout of ${config.timeoutMs}ms. Cancelling isolate..." }
                 // The runaway script is still executing inside the QuickJS isolate —
-                // close() terminates it; the isolate is dead afterwards, so reset().
+                // close() terminates it; the isolate is dead afterwards, so rebuild it.
                 runCatching { isolate.close() }
-                reset()
-                return@withContext SandboxResult.Timeout(timeoutMs = config.timeoutMs, executionTimeMs = elapsed)
+                recreateIsolate()
+                return SandboxResult.Timeout(timeoutMs = config.timeoutMs, executionTimeMs = elapsed)
             }
 
             AgentLogger.d(tag) { "Script completed in ${elapsed}ms: $rawResult" }
@@ -120,7 +140,7 @@ class QuickJsSandbox(
             val elapsed = System.currentTimeMillis() - startTime
             AgentLogger.w(tag) { "Coroutine timeout after ${elapsed}ms. Cancelling isolate..." }
             currentIsolate?.let { runCatching { it.close() } }
-            reset()
+            recreateIsolate()
             SandboxResult.Timeout(timeoutMs = config.timeoutMs, executionTimeMs = elapsed)
         } catch (e: Exception) {
             val elapsed = System.currentTimeMillis() - startTime
@@ -131,7 +151,7 @@ class QuickJsSandbox(
                 message.contains("heap", ignoreCase = true) ||
                 message.contains("out of memory", ignoreCase = true)
             ) {
-                reset()
+                recreateIsolate()
                 SandboxResult.MemoryLimitExceeded(maxMemoryBytes = config.maxMemoryBytes, executionTimeMs = elapsed)
             } else {
                 SandboxResult.Error(
@@ -143,7 +163,13 @@ class QuickJsSandbox(
         }
     }
 
-    override suspend fun reset(): Result<Unit> = initMutex.withLock {
+    /**
+     * Rebuilds the isolate. The public entry point takes [execMutex] first, so it can't pull the isolate out
+     * from under a script that is executing; the inside of [execute] (already holding the lock) uses the private [recreateIsolate].
+     */
+    override suspend fun reset(): Result<Unit> = execMutex.withLock { recreateIsolate() }
+
+    private suspend fun recreateIsolate(): Result<Unit> = initMutex.withLock {
         runCatching {
             AgentLogger.d(tag) { "Resetting JavaScript isolate..." }
             currentIsolate?.close()

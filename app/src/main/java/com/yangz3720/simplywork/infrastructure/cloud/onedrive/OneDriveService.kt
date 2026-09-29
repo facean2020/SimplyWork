@@ -18,16 +18,16 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /**
- * [OneDriveOwner] 的实现（v1.4）：认证（MSAL）+ Graph + 镜像引擎 + 惰性调度策略。
+ * Implementation of [OneDriveOwner] (v1.4): authentication (MSAL) + Graph + mirror engine + lazy scheduling policy.
  *
- * **惰性策略**（用户定调"双向镜像但尽量懒惰、耗电低"）：
- * - 绑定/新建绑定时必然同步一次（首次校准）。
- * - 一轮 agent run 结束后 `pushAfterRun`：只推不拉；无本地改动时零网络请求。
- * - 进入/切换项目时 `sync(throttled = true)`：距上次拉取不足 [pullIntervalMs] 直接跳过。
- * - 没有轮询、没有后台任务、没有 Webhook 订阅（Webhook 要公网回调，端侧不成立）。
+ * **Lazy policy** (the user set the tone: "two-way mirror, but as lazy as possible, low power"):
+ * - Binding/creating a binding necessarily syncs once (initial calibration).
+ * - `pushAfterRun` once a round of agent run ends: push only, never pull; zero network requests when there are no local changes.
+ * - Entering/switching projects calls `sync(throttled = true)`: skipped outright when less than [pullIntervalMs] has passed since the last pull.
+ * - No polling, no background tasks, no Webhook subscription (a Webhook needs a public-facing callback, which does not hold on the device side).
  *
- * 全部同步操作串行化在一个 [Mutex] 上：同一时刻只可能有一个项目在跑镜像，
- * 既避免并发写同一份 manifest，也避免并发把令牌刷爆。
+ * Every sync operation is serialized on a single [Mutex]: only one project can be mirroring at a time,
+ * which avoids both concurrent writes to the same manifest and concurrently hammering the token.
  */
 class OneDriveService(
     context: Context,
@@ -44,7 +44,7 @@ class OneDriveService(
         manifests = SyncManifestStore(File(appContext.filesDir, "agent_workspace/sync"))
     )
 
-    /** OkHttp 引擎较重，按需建一次即常驻；应用生命周期内不再重建。 */
+    /** The OkHttp engine is heavy, so it is created once on demand and then stays resident; it is never rebuilt for the lifetime of the app. */
     @Volatile
     private var client: OneDriveGraphClient? = null
 
@@ -58,7 +58,7 @@ class OneDriveService(
 
     override val configured: Boolean get() = auth.isConfigured()
 
-    // ----- 账号 -----
+    // ----- Account -----
 
     override suspend fun restore() {
         auth.restore()
@@ -69,7 +69,7 @@ class OneDriveService(
 
     override suspend fun disconnect(): Result<Unit> = auth.signOut()
 
-    // ----- 文件夹选择 -----
+    // ----- Folder selection -----
 
     override suspend fun listFolders(parentId: String, parentPath: String): Result<List<CloudFolder>> =
         runCatching {
@@ -80,7 +80,7 @@ class OneDriveService(
                 .map { CloudFolder(id = it.id, name = it.name, path = childPath(parentPath, it.name)) }
         }
 
-    // ----- 绑定 -----
+    // ----- Binding -----
 
     override suspend fun bindFolder(projectId: String, folder: CloudFolder): Result<SyncReport> =
         guarded("正在同步") {
@@ -106,7 +106,7 @@ class OneDriveService(
         _syncState.value = SyncState.Info("已取消关联")
     }
 
-    // ----- 同步 -----
+    // ----- Sync -----
 
     override suspend fun sync(projectId: String, throttled: Boolean): Result<SyncReport?> = lock.withLock {
         val binding = projects.oneDriveBinding(projectId) ?: return@withLock Result.success(null)
@@ -126,7 +126,7 @@ class OneDriveService(
         runCatching {
             val report = engine.pushOnly(drive(), projectId, binding).getOrThrow()
             if (report.uploaded == 0 && report.deletedRemote == 0) {
-                // 本次 run 没改动工作区：不发状态、不动 lastSyncedAt（这就是"懒惰"的落点）
+                // This run changed nothing in the workspace: emit no state, leave lastSyncedAt alone (this is where "laziness" lands)
                 null
             } else {
                 _syncState.value = SyncState.Info(summarize(report))
@@ -137,9 +137,9 @@ class OneDriveService(
         }
     }
 
-    // ----- 内部 -----
+    // ----- Internals -----
 
-    /** 绑定信息落库：只有成功写回才继续，否则显式失败（不留下"以为绑上了"的假象）。 */
+    /** Persist the binding info: continue only once the write-back succeeds, otherwise fail explicitly (never leave the illusion of "it looked bound"). */
     private fun record(projectId: String, report: SyncReport): SyncReport {
         check(projects.updateOneDrive(projectId) { report.binding }) { "未知项目：$projectId" }
         _syncState.value = SyncState.Info(summarize(report))
@@ -177,8 +177,8 @@ class OneDriveService(
 
     private companion object {
         /**
-         * 进入项目触发拉取的最小间隔。10 分钟是"够新"与"够省电"之间的取舍：拉取走
-         * delta 游标只回变化量，但每次仍要唤醒网络栈，对端侧电量不友好。
+         * Minimum interval for the pull triggered by entering a project. 10 minutes is the trade-off between "fresh enough" and "frugal enough": a pull goes
+         * through the delta cursor and returns only the changes, but it still wakes the network stack every time, which is unkind to device battery.
          */
         const val DEFAULT_PULL_INTERVAL_MS = 10 * 60 * 1000L
     }

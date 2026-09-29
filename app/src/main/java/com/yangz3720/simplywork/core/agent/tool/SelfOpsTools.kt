@@ -27,12 +27,12 @@ import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.serializer
 
 /**
- * 配置自操作缝（v1.3）：agent 读配置快照、发起白名单内的变更。
+ * Config self-operation seam (v1.3): the agent reads the config snapshot and issues changes inside the whitelist.
  *
- * Android 上 App 操作自己的私有目录不需要任何权限，但让 agent 直接写
- * `shared_prefs` XML 或 SQLite 是自毁行为 —— 所以这里只暴露**类型化白名单**
- * （切换模型/服务商、改超时、切当前项目），与 UI 点选走同一条 [KeyringLogic]/
- * [ProjectStore] 路径。API Key 永远不在白名单内（用户拍板），快照里只有 `hasKey`。
+ * On Android an app operating on its own private directory needs no permission, but letting the agent write
+ * `shared_prefs` XML or SQLite directly is self-destructive — so only a **typed whitelist** is exposed
+ * here (switch model/provider, change timeout, switch current project), taking the same [KeyringLogic]/
+ * [ProjectStore] path as UI taps. The API key is never in the whitelist (user decision); the snapshot only carries `hasKey`.
  */
 interface AgentSelfConfig {
 
@@ -58,27 +58,27 @@ interface AgentSelfConfig {
 
     fun snapshot(): Snapshot
 
-    /** 运行中调用是允许的：变更落盘，runtime 重建推迟到空闲（见 AppContainer 缝实现）。 */
+    /** Calling this while running is allowed: the change is persisted and the runtime rebuild is deferred to idle (see the AppContainer seam implementation). */
     suspend fun apply(mutation: Mutation): ApplyResult
 }
 
 /**
- * 自操作工具族（v1.3，用户定调"操作自己"）：`todo_write` 先例的延伸 —— 这些不是
- * Android 系统能力，**不走 SystemOperationRouter**，直接以 [RegisteredTool] 注册
- * （超时归一、异常归一由 Router 承担的只是"系统 Intent 语义"；文件与配置操作是
- * 进程内同步调用，天然有界）。
+ * Self-operation tool family (v1.3, the user's call to "operate on itself"): an extension of the `todo_write` precedent — these are not
+ * Android system capabilities, so they do **not go through SystemOperationRouter** and are registered directly as [RegisteredTool]
+ * instances (the timeout normalization and exception normalization the Router performs only cover "system Intent semantics";
+ * file and config operations are in-process synchronous calls, inherently bounded).
  *
- * 三族：
- * - `self_config_read` / `self_config_update`（USER_CONFIRMING）：配置 hook，白名单内。
- * - `self_session_read`：只读会话 DAG（结构 + payload），跨会话可读。
- * - `self_project_create` + `fs_list/read/write/mkdir`（SAFE）、`fs_move`（USER_VISIBLE）、
- *   `fs_delete`（USER_CONFIRMING，用户定调"写 SAFE、删确认"）。
+ * Three groups:
+ * - `self_config_read` / `self_config_update` (USER_CONFIRMING): config hooks, inside the whitelist.
+ * - `self_session_read`: read-only session DAG (structure + payload), readable across sessions.
+ * - `self_project_create` + `fs_list/read/write/mkdir` (SAFE), `fs_move` (USER_VISIBLE),
+ *   `fs_delete` (USER_CONFIRMING, the user's call: "writes SAFE, deletes confirmed").
  */
 object SelfOpsTools {
 
     private const val TAG = "SelfOpsTools"
 
-    // ----- 输入 -----
+    // ----- Input -----
 
     @Serializable
     data class ConfigUpdateInput(
@@ -116,14 +116,14 @@ object SelfOpsTools {
 
     private val json = Json { ignoreUnknownKeys = true }
 
-    // ----- 注册 -----
+    // ----- Registration -----
 
     fun registeredTools(
         repository: SessionRepository,
         config: AgentSelfConfig,
         workspace: AgentWorkspace,
         projects: ProjectStore,
-        /** v1.5：fs_* 的每笔改动落在这里，对话流据此渲染 diff 卡片。 */
+        /** v1.5: every fs_* change lands here; the conversation stream renders diff cards from it. */
         changes: FileChangeLog
     ): List<RegisteredTool> = listOf(
         configRead(config),
@@ -298,7 +298,7 @@ object SelfOpsTools {
                                 put("status", node.status.name)
                                 put("createdAt", node.createdAt)
                                 if (input.includePayloads) {
-                                    // 损坏的 payload 跳过而不是断流（P2 显式字段）。
+                                    // A corrupted payload is skipped rather than breaking the stream (P2 explicit field).
                                     runCatching { repository.payload(node) }.getOrNull()
                                         ?.let { put("payload", it) }
                                         ?: put("payloadUnavailable", true)
@@ -333,7 +333,7 @@ object SelfOpsTools {
                 ?: return@RegisteredTool error("self_project_create arguments did not parse")
             projects.create(input.name).fold(
                 onSuccess = { project ->
-                    workspace.projectDir(project.id) // 沙箱目录与项目同生
+                    workspace.projectDir(project.id) // the sandbox directory is created together with the project
                     buildJsonObject {
                         put("status", "success")
                         put("projectId", project.id)
@@ -346,9 +346,9 @@ object SelfOpsTools {
         }
     )
 
-    // ----- fs_* 工具 -----
+    // ----- fs_* tools -----
 
-    /** projectId 缺省 = 当前项目；显式给出则必须存在（P2 显式失败）。 */
+    /** projectId defaults to the current project; when given explicitly it must exist (P2 explicit failure). */
     private fun resolveProjectId(projects: ProjectStore, requested: String?): String {
         val id = requested ?: projects.currentId()
         if (projects.byId(id) == null) {
@@ -446,7 +446,7 @@ object SelfOpsTools {
             guarded {
                 val input = parsed as? FsWriteInput ?: throw IllegalArgumentException("fs_write arguments did not parse")
                 val projectId = resolveProjectId(projects, input.projectId)
-                // 写入前的原文：改动卡片要报的是"真实的差异"，不是"新内容"。
+                // The prior text before writing: the change card must report the "real diff", not the "new content".
                 val existing = workspace.readOrNull(projectId, input.path)
                 val baseline = existing?.takeIf { !it.truncated }?.content
                 val result = workspace.write(projectId, input.path, input.content, input.append)
@@ -462,15 +462,15 @@ object SelfOpsTools {
                             else -> FileChangeKind.Updated
                         },
                         diff = when {
-                            // 新建：一侧为空 → 全增，精确。
+                            // Newly created: one side is empty -> everything is an addition, exact.
                             existing == null -> TextDiff.compute("", input.content)
                             baseline != null -> TextDiff.compute(
                                 baseline,
                                 if (input.append) baseline + input.content else input.content
                             )
-                            // 追加但基线被读侧上限截断：算出的增量仍然是对的（就是追加的那些行）。
+                            // Appended but the baseline was truncated by the read-side cap: the computed delta is still correct (exactly the appended lines).
                             input.append -> TextDiff.compute("", input.content)
-                            // 整篇覆盖 + 基线不可信 → 不比较，只报路径（不拿新内容冒充新增）。
+                            // Whole-file overwrite + untrustworthy baseline -> do not compare, report only the path (do not pass new content off as additions).
                             else -> null
                         }
                     )
@@ -538,7 +538,7 @@ object SelfOpsTools {
                 val input = parsed as? FsMoveInput ?: throw IllegalArgumentException("fs_move arguments did not parse")
                 val projectId = resolveProjectId(projects, input.projectId)
                 val result = workspace.move(projectId, input.from, input.to)
-                // 重命名没有内容差异可比，卡片报"从哪到哪"就是全部事实。
+                // A rename has no content diff to compare; the card reporting "from where to where" is the whole truth.
                 recordQuietly(
                     changes,
                     changeOf(
@@ -576,14 +576,14 @@ object SelfOpsTools {
             )
         ),
         dangerLevel = DangerLevel.USER_CONFIRMING,
-        // 全 App 唯一会不可逆删数据的工具：自动批准（v1.1）下它仍然必须问人。
+        // The only tool in the whole app that deletes data irreversibly: even under auto-approval (v1.1) it must still ask the user.
         destructive = true,
         parser = { raw -> Result.success(decode<FsDeleteInput>(raw)) },
         runner = { parsed, context ->
             guarded {
                 val input = parsed as? FsDeleteInput ?: throw IllegalArgumentException("fs_delete arguments did not parse")
                 val projectId = resolveProjectId(projects, input.projectId)
-                // 先取原文：删掉之后就没有地方能回答"删了哪些行"了（目录没有内容可比）。
+                // Read the prior text first: after deleting there is nowhere left to answer "which lines were deleted" (a directory has no content to compare).
                 val removed = workspace.readOrNull(projectId, input.path)?.takeIf { !it.truncated }
                 val result = workspace.delete(projectId, input.path, input.recursive)
                 recordQuietly(
@@ -605,9 +605,9 @@ object SelfOpsTools {
         }
     )
 
-    // ----- 改动记录 -----
+    // ----- Change log -----
 
-    /** 组装一笔改动：可比较时带上差异与行数，不可比较时只报事实（path / kind）。 */
+    /** Assemble one change: include the diff and line counts when comparable, report only the facts (path / kind) when not. */
     private fun changeOf(
         context: ToolExecutionContext,
         projectId: String,
@@ -631,8 +631,8 @@ object SelfOpsTools {
     )
 
     /**
-     * 记改动。**文件已经写成功了**，所以这里绝不能因为"记一笔卡片"失败而把工具结果变成
-     * 错误 —— 那是对文件状态的撒谎（P2 的反面：宁可少一张卡片，不多一条假失败）。
+     * Record a change. **The file write already succeeded**, so this must never turn the tool result into
+     * an error because "recording a card" failed — that would be lying about the file state (the inverse of P2: rather one card too few than one false failure).
      */
     private suspend fun recordQuietly(log: FileChangeLog, change: FileChange) {
         try {
@@ -644,7 +644,7 @@ object SelfOpsTools {
         }
     }
 
-    // ----- 辅助 -----
+    // ----- Helpers -----
 
     private inline fun <reified T> decode(raw: JsonObject): T = json.decodeFromJsonElement<T>(raw)
 
@@ -654,9 +654,9 @@ object SelfOpsTools {
     }
 
     /**
-     * runner 统一出口：沙箱拒绝 / 参数越界等运行期异常归一成 JSON 错误对象，
-     * 模型能读到原因并自纠（P2/P5 精神：异常不裸抛进循环）。
-     * v1.5 起是 `suspend`：块内要落一笔改动记录（见 [recordQuietly]）。
+     * The single exit of every runner: runtime exceptions such as sandbox refusal / out-of-range arguments
+     * are normalized into a JSON error object so the model can read the reason and self-correct (the spirit of P2/P5: no raw exception is thrown into the loop).
+     * `suspend` since v1.5: the block has to record a change (see [recordQuietly]).
      */
     private suspend inline fun guarded(crossinline block: suspend () -> JsonObject): JsonObject = try {
         block()

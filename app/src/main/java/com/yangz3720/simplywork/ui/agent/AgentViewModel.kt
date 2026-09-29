@@ -27,12 +27,12 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** 当前模型选择：服务商账号 + 模型 id（对话界面顶栏动态切换）。 */
+/** Current model selection: provider account + model id (switched dynamically from the chat top bar). */
 data class ModelSelection(val providerId: String, val model: String)
 
 /**
- * Composition-root 缝（architecture.md `AgentViewModel` 的依赖注入面）：App 容器实现，
- * JVM 测试用 fake。多服务商语义：各服务商只保存密钥，provider+model 由对话屏动态选择。
+ * Composition-root seam (the DI surface of `AgentViewModel` in architecture.md): the App container
+ * implements it, JVM tests use a fake. Multi-provider semantics: each provider only stores its key; provider+model are picked on the chat screen.
  */
 interface AgentRuntimeOwner {
     fun current(): AgentRuntime?
@@ -40,69 +40,69 @@ interface AgentRuntimeOwner {
     fun selection(): ModelSelection?
 
     /**
-     * 配置版本（v1.3）：agent 经 self_config_update 自改配置时自增。VM 据此在空闲时
-     * 调 [rebuildRuntimeIfNeeded] 让变更落地（run 内重建会换掉运行中的 coordinator）。
+     * Config version (v1.3): bumped when the agent edits its own config via self_config_update. The VM
+     * uses it to call [rebuildRuntimeIfNeeded] while idle, so the change lands (rebuilding mid-run would swap out the running coordinator).
      */
     val configVersion: StateFlow<Int>
 
-    /** 落地待重建的配置变更（no-op 当无变更）；调用方保证当前无运行中的 run。 */
+    /** Apply the pending config change that needs a rebuild (no-op when there is none); the caller guarantees no run is active. */
     fun rebuildRuntimeIfNeeded()
 
-    /** 设置页：保存某服务商的 API Key（若为当前选中服务商则重建运行时）。 */
+    /** Settings screen: save a provider's API key (rebuilds the runtime when it is the currently selected provider). */
     fun saveAccountKey(accountId: String, apiKey: String)
 
-    /** 设置页：新增自定义端点，返回落库后的账号。 */
+    /** Settings screen: add a custom endpoint; returns the persisted account. */
     fun upsertCustomAccount(name: String, baseUrl: String, apiKey: String): ProviderAccount
 
-    /** 设置页：删除自定义端点（预设不可删，调用方保证）。 */
+    /** Settings screen: remove a custom endpoint (presets cannot be removed; the caller guarantees this). */
     fun removeCustomAccount(accountId: String)
 
-    /** 对话屏顶栏：切换当前服务商 + 模型并重建运行时（调用方保证当前无运行中的 run）。 */
+    /** Chat top bar: switch the current provider + model and rebuild the runtime (the caller guarantees no run is active). */
     fun applySelection(providerId: String, model: String)
 
-    /** 设置页（v1.1）：非删除类调用是否自动批准。 */
+    /** Settings screen (v1.1): whether non-destructive calls are auto-approved. */
     fun autoApproveNonDestructive(): Boolean
 
-    /** 设置页（v1.1）：切换自动批准（会重建运行时，使门禁拿到新策略）。 */
+    /** Settings screen (v1.1): toggle auto-approval (rebuilds the runtime so the audit gate picks up the new policy). */
     fun setAutoApproveNonDestructive(enabled: Boolean)
 
-    /** 设置页（v1.1）：当前模型的上下文预算（含它从哪来，设置页要如实展示）。未选模型时 null。 */
+    /** Settings screen (v1.1): context budget of the current model (including where it comes from; the settings screen must show this faithfully). Null when no model is selected. */
     fun contextBudget(): ContextBudgetPlan?
 
-    /** 设置页（v1.1）：手动指定上下文预算；null = 回到自动推导。 */
+    /** Settings screen (v1.1): manually set the context budget; null = fall back to automatic derivation. */
     fun setContextBudgetOverride(tokens: Int?)
 
-    /** 按服务商账号拉取端点可用模型列表（GET /models）。 */
+    /** Fetch the endpoint's available model list for a provider account (GET /models). */
     suspend fun fetchModels(account: ProviderAccount): Result<List<String>>
 }
 
 /**
- * MVI 状态管理器（architecture.md UI 层）：把 [AgentRuntimeOwner] 提供的循环/队列
- * 与 SessionRepository 投影成 [AgentUiState]。
+ * MVI state holder (UI layer in architecture.md): projects the loop/queue offered by
+ * [AgentRuntimeOwner] plus SessionRepository into [AgentUiState].
  *
- * 职责：
- * - 运行驱动：collect `AgentLoopCoordinator.run` 的 cold Flow（Q2：循环外层重启，
- *   失败后由 [retry] 以 `initialPrompt=null` 续跑）；
- * - 多会话：ChatGPT 式列表（[startNewChat] 延迟建会话，首条消息以首行为标题）；
- * - HITL（Q1）：透出 [ApprovalCoordinator.pending] 供 UI 弹窗决策；
- * - 运行中输入自动降级为 Steer（design §6 节点 B）。
+ * Responsibilities:
+ * - Run driving: collect the cold Flow of `AgentLoopCoordinator.run` (Q2: the loop restarts from
+ *   the outside; after a failure [retry] resumes with `initialPrompt=null`);
+ * - Multi-session: ChatGPT-style list ([startNewChat] creates the session lazily, the first message's first line becomes the title);
+ * - HITL (Q1): exposes [ApprovalCoordinator.pending] so the UI can show the approval dialog;
+ * - Input sent while running degrades to Steer automatically (design section 6 node B).
  */
 class AgentViewModel(
     private val owner: AgentRuntimeOwner,
     /**
-     * 运行驱动（v1.6）：run 的持有者是进程级的 supervisor，不再是本 VM 的 viewModelScope。
-     * Activity 销毁/退到后台后 run 继续跑（前台服务把进程钉在前台），本 VM 退化成订阅者。
+     * Run driving (v1.6): the run is owned by the process-level supervisor, no longer by this VM's viewModelScope.
+     * The run keeps going after the Activity is destroyed or backgrounded (the foreground service pins the process up front) and this VM degrades to a subscriber.
      */
     private val runSupervisor: AgentRunSupervisor,
     val approvalCoordinator: ApprovalCoordinator,
     /** Must be the same instance the AppContainer wired into the executor — a private copy
      * would leave every permission request hanging until the router timeout. */
     val permissionCoordinator: PermissionCoordinator,
-    /** 项目注册表（v1.3）：会话归属 + 沙箱目录；UI 与 agent 共用同一实例。 */
+    /** Project registry (v1.3): session ownership + sandbox directory; the UI and the agent share the same instance. */
     private val projectStore: ProjectStore,
-    /** OneDrive 接缝（v1.4）：账号、云端文件夹浏览、镜像同步。 */
+    /** OneDrive seam (v1.4): account, cloud folder browsing, mirror sync. */
     private val oneDrive: OneDriveOwner,
-    /** 项目文件接缝（v1.5）：只读浏览/预览 + 会话改动记录。 */
+    /** Project files seam (v1.5): read-only browsing / preview + the session change log. */
     private val projectFiles: ProjectFilesOwner,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : ViewModel() {
@@ -124,19 +124,19 @@ class AgentViewModel(
         )
     }
 
-    /** HITL 挂起请求（Q1）；非空时 UI 显示审批对话框。 */
+    /** HITL pending request (Q1); when non-null the UI shows the approval dialog. */
     val approval = approvalCoordinator.pending
 
-    /** 挂起的运行时权限请求（v1.2）；非空时 UI 触发系统授权弹窗。 */
+    /** Pending runtime permission request (v1.2); when non-null the UI triggers the system grant dialog. */
     val permission = permissionCoordinator.pending
 
     init {
         viewModelScope.launch(ioDispatcher) {
             val sessions = sessionsForCurrentProject(repository()?.listSessions().orEmpty())
             _uiState.update { it.copy(sessions = sessions) }
-            // 正在执行的 run 优先接管：从通知点回来 / Activity 重建时，界面必须落在执行中的
-            // 那个会话上，而不是"最近一个会话"。这条路径**不能**走 openSession —— 那会顺手
-            // 把 run 停掉（见 openSession 的语义）。
+            // The currently executing run takes over first: coming back from the notification / after an Activity
+            // recreation, the UI must land on the executing session, not on "the most recent session". This path
+            // **must not** go through openSession -- that would incidentally stop the run (see openSession's semantics).
             val running = runSupervisor.state.value
             val target = running.sessionId?.takeIf { id -> sessions.any { it.id == id } }
                 ?: sessions.firstOrNull()?.id
@@ -144,21 +144,21 @@ class AgentViewModel(
                 if (running.running) switchToSession(target) else openSession(target)
             }
         }
-        // v1.6：running/iteration 只在 supervisor 里维护一处 —— run 可能在本 VM 诞生之前
-        // 就开始了（Activity 重建），也可能在本 VM 销毁之后继续。UI 侧所有"运行中拒绝"
-        // 门禁读的仍是 uiState.running，只是它的来源变成了这里。
+        // v1.6: running/iteration are maintained in exactly one place, the supervisor -- a run may have started
+        // before this VM was born (Activity recreation) and may continue after this VM is destroyed. Every UI-side
+        // "reject while running" gate still reads uiState.running; only its source changed to here.
         viewModelScope.launch(ioDispatcher) {
             runSupervisor.state.collect { run ->
                 _uiState.update { it.copy(running = run.running, iteration = run.iteration) }
             }
         }
-        // 循环事件的投影（会话重投影 / 待办 / 会话列表）留在 UI 侧：事实都在 repository 里，
-        // 事件只决定"什么时候重新读"。
+        // Projecting loop events (conversation re-projection / todos / session list) stays on the UI side:
+        // the facts live in the repository, and the events only decide "when to read them again".
         viewModelScope.launch(ioDispatcher) {
             runSupervisor.events.collect { onEvent(it) }
         }
-        // v1.3：agent 经 self_config_update 自改配置 → 空闲时落地重建（run 内不重建，
-        // 否则会换掉运行中的 coordinator；变更对下一轮 run 生效，工具结果里已声明）。
+        // v1.3: the agent edits its own config via self_config_update -> the rebuild lands while idle (never
+        // during a run, which would swap out the running coordinator; the change applies to the next run and the tool result already declared it).
         viewModelScope.launch(ioDispatcher) {
             owner.configVersion.drop(1).collect {
                 if (!_uiState.value.running) {
@@ -167,17 +167,17 @@ class AgentViewModel(
                 }
             }
         }
-        // 项目/当前项目变更（UI 或 agent）→ 会话过滤条件变了，刷新列表。
+        // Project / current-project change (UI or agent) -> the session filter changed, refresh the list.
         viewModelScope.launch(ioDispatcher) {
             projectStore.changes.drop(1).collect { refreshProjectsAndSessions() }
         }
-        // OneDrive（v1.4）：启动时恢复已登录账号，并把账号/同步状态透出给 UI。
+        // OneDrive (v1.4): restore the signed-in account at startup and expose account / sync state to the UI.
         viewModelScope.launch(ioDispatcher) {
             oneDrive.restore()
             _uiState.update {
                 it.copy(oneDriveAccount = oneDrive.account.value, oneDriveConfigured = oneDrive.configured)
             }
-            // 已绑定的当前项目：进入即懒惰拉取一次（带节流，冷启动必然超过间隔）。
+            // Bound current project: pull lazily once on entry (throttled; a cold start necessarily exceeds the interval).
             oneDrive.sync(_uiState.value.currentProjectId, throttled = true)
         }
         viewModelScope.launch(ioDispatcher) {
@@ -190,13 +190,13 @@ class AgentViewModel(
         }
     }
 
-    // ----- 会话管理 -----
+    // ----- Session management -----
 
-    /** ChatGPT 式新对话：清空当前投影；会话在首条消息发送时才落库（归属当前项目）。 */
+    /** ChatGPT-style new chat: clears the current projection; the session is only persisted when the first message is sent (owned by the current project). */
     fun startNewChat() {
         runSupervisor.stop()
-        // 用 copy 而不是重建：只清会话投影，服务商/项目/OneDrive 等横向状态全部保留
-        // （重建式的写法会在新增状态字段时静默丢字段）。
+        // copy rather than rebuild: only the session projection is cleared, so provider / project / OneDrive and
+        // other orthogonal state all survive (a rebuild-style version would silently drop fields when new ones are added).
         _uiState.update { current ->
             current.copy(
                 currentSessionId = null,
@@ -206,17 +206,17 @@ class AgentViewModel(
                 iteration = 0,
                 runError = null,
                 todos = emptyList(),
-                // 新增文件卡片属于"这个会话产出了什么"，换会话就没有了。
+                // The new-files card means "what this session produced", so it is gone once the session changes.
                 newFiles = emptyList(),
-                // 新会话还没发过请求，上下文用量归零（否则会显示上一个会话的数）。
+                // A new session has not sent a request yet, so context usage is zeroed (otherwise the previous session's number would show).
                 contextPromptTokens = 0
             )
         }
     }
 
-    // ----- 项目（v1.3）-----
+    // ----- Projects (v1.3) -----
 
-    /** 切换当前项目：会话列表过滤 + 新会话归属 + fs_* 工具默认目录随之改变。运行中拒绝。 */
+    /** Switch the current project: session list filtering + new session ownership + the default directory of the fs_* tools all follow. Rejected while running. */
     fun switchProject(projectId: String) {
         if (_uiState.value.running) {
             _uiState.update { it.copy(runError = "正在运行中，请先停止当前任务再切换项目") }
@@ -226,16 +226,16 @@ class AgentViewModel(
             _uiState.update { it.copy(runError = "未知项目：$projectId") }
             return
         }
-        // switchTo 触发 projectStore.changes → refreshProjectsAndSessions；
-        // 这里把对话投影切回"新对话"空态（旧项目的会话不再属于当前视图）。
+        // switchTo triggers projectStore.changes -> refreshProjectsAndSessions; here the conversation projection
+        // goes back to the empty "new chat" state (the old project's sessions are no longer part of the current view).
         startNewChat()
-        // 文件浏览器指向上一个项目的目录了，回落根目录（下次打开重新列）。
+        // The file browser now points at the previous project's directory, so fall back to the root (it re-lists on the next open).
         _uiState.update { it.copy(filePath = "", fileEntries = emptyList(), filesError = null, filePreview = null) }
-        // 进入项目即懒惰拉取一次（节流在 owner 侧；10 分钟内不重复打网络）。
+        // Pull lazily once on entering a project (throttling lives in the owner; no repeated network calls within 10 minutes).
         viewModelScope.launch(ioDispatcher) { oneDrive.sync(projectId, throttled = true) }
     }
 
-    /** 新建项目（沙箱目录与项目同生）；不切换当前项目。 */
+    /** Create a project (the sandbox directory is born with it); does not switch the current project. */
     fun createProject(name: String) {
         if (_uiState.value.running) return
         viewModelScope.launch(ioDispatcher) {
@@ -247,19 +247,19 @@ class AgentViewModel(
     }
 
     /**
-     * 删除项目（**不可撤销**，UI 侧必须先弹窗确认）：项目名下的一切都清掉 ——
-     * 全部会话（消息 + payload + 改动记录）、沙箱目录、云端同步基线，最后才是项目条目。
+     * Delete a project (**irreversible**; the UI must confirm with a dialog first): everything under the project
+     * is wiped -- all sessions (messages + payload + change log), the sandbox directory, the cloud sync baseline, and only then the project entry.
      *
-     * 云端**文件保留**：解绑只丢基线，绝不因为删本地项目去动用户的网盘。
-     * 顺序刻意是"先清子数据、后删条目"：中途失败时项目还在，可以重来一次；
-     * 反过来先删条目就会留下一堆再也认不回来的孤儿数据。
+     * Cloud **files are kept**: unbinding only drops the baseline; deleting a local project never touches the user's drive.
+     * The order is deliberately "clear the child data first, delete the entry last": if it fails midway the project
+     * is still there and can be retried; the other order would leave orphan data that can never be recognised again.
      */
     fun deleteProject(projectId: String) {
         if (_uiState.value.running) {
             _uiState.update { it.copy(runError = "正在运行中，请先停止当前任务再删除项目") }
             return
         }
-        // 默认项目先挡在这里：注册表最后一步才会拒绝它，等走到那儿会话与沙箱已经被清空了。
+        // The default project is blocked right here: the registry only rejects it at the last step, by which point the sessions and the sandbox are already wiped.
         if (projectId == ProjectLogic.DEFAULT_PROJECT_ID) {
             _uiState.update { it.copy(runError = "默认项目不可删除") }
             return
@@ -277,20 +277,20 @@ class AgentViewModel(
             projectFiles.deleteProject(projectId)
             projectStore.delete(projectId).fold(
                 onSuccess = {
-                    // 删的是当前项目 → 会话投影必须跟着回落，否则对话还停在已删项目的会话上。
+                    // The current project was deleted -> the session projection must fall back with it, otherwise the chat stays on a session of the deleted project.
                     if (wasCurrent) startNewChat()
-                    // projectStore.delete 已 bump changes → refreshProjectsAndSessions。
+                    // projectStore.delete already bumped changes -> refreshProjectsAndSessions.
                 },
                 onFailure = { e -> _uiState.update { it.copy(runError = e.message ?: "删除项目失败") } }
             )
         }
     }
 
-    // ----- 会话删除 -----
+    // ----- Session deletion -----
 
     /**
-     * 删除单个会话（**不可撤销**）：节点、State Memory、payload 文件与改动记录一并清除。
-     * 删的若是当前会话则回到"新对话"空态。
+     * Delete a single session (**irreversible**): nodes, state memory, payload files and the change log are cleared together.
+     * If the deleted session is the current one, go back to the empty "new chat" state.
      */
     fun deleteSession(sessionId: String) {
         if (_uiState.value.running) {
@@ -305,11 +305,11 @@ class AgentViewModel(
         }
     }
 
-    // ----- OneDrive（v1.4）：账号 / 文件夹浏览 / 绑定 / 同步 -----
+    // ----- OneDrive (v1.4): account / folder browsing / binding / sync -----
 
     /**
-     * 交互式登录（[activity] 由 UI 从 LocalActivity 传入，MSAL 用它拉起授权页）。
-     * 允许 null 并显式报错：静默不响应点击比报错更难排查（P2）。
+     * Interactive sign-in ([activity] is passed in by the UI from LocalActivity; MSAL uses it to launch the auth page).
+     * Null is allowed and reported explicitly: silently ignoring the click is harder to debug than an error (P2).
      */
     fun connectOneDrive(activity: Activity?) {
         if (activity == null) {
@@ -323,12 +323,12 @@ class AgentViewModel(
         }
     }
 
-    /** 登出；只清账号，不动任何绑定与本地文件。 */
+    /** Sign out; only clears the account, touching no bindings and no local files. */
     fun disconnectOneDrive() {
         viewModelScope.launch(ioDispatcher) { oneDrive.disconnect() }
     }
 
-    /** 打开/下钻云端文件夹选择器。[parentId] = "root" 表示网盘根。 */
+    /** Open / drill into the cloud folder picker. [parentId] = "root" means the drive root. */
     fun browseCloudFolders(parentId: String, parentPath: String) {
         _uiState.update { it.copy(cloudBusy = true, cloudError = null) }
         viewModelScope.launch(ioDispatcher) {
@@ -341,9 +341,9 @@ class AgentViewModel(
         }
     }
 
-    /** 绑定到云端文件夹：owner 侧先做一次首轮对齐（空项目拉取 / 有内容则上传）。 */
+    /** Bind to a cloud folder: the owner performs a first alignment up front (pull when the project is empty, upload when it has content). */
     fun bindCloudFolder(projectId: String, folder: CloudFolder) {
-        // 重试时先清掉上一条错误，否则旧提示会和新结果并排显示。
+        // Clear the previous error first on retry, otherwise the old message shows side by side with the new result.
         _uiState.update { it.copy(cloudError = null) }
         viewModelScope.launch(ioDispatcher) {
             oneDrive.bindFolder(projectId, folder).onFailure { e ->
@@ -352,7 +352,7 @@ class AgentViewModel(
         }
     }
 
-    /** 在云端新建文件夹并绑定。 */
+    /** Create a folder in the cloud and bind to it. */
     fun createCloudFolderAndBind(projectId: String, parentId: String, parentPath: String, name: String) {
         _uiState.update { it.copy(cloudError = null) }
         viewModelScope.launch(ioDispatcher) {
@@ -370,7 +370,7 @@ class AgentViewModel(
         }
     }
 
-    /** 用户显式"立即同步"：跳过节流。运行中拒绝（同步会与 run 争抢同一份工作区）。 */
+    /** Explicit user "sync now": skips throttling. Rejected while running (a sync would contend with the run for the same workspace). */
     fun syncCloudNow(projectId: String) {
         if (_uiState.value.running) {
             _uiState.update { it.copy(cloudError = "正在运行中，请先停止当前任务再同步") }
@@ -383,19 +383,19 @@ class AgentViewModel(
         _uiState.update { it.copy(cloudError = null) }
     }
 
-    // ----- 项目文件（v1.5）：只读浏览 / 预览 -----
+    // ----- Project files (v1.5): read-only browsing / preview -----
 
-    /** 打开文件管理器：回到项目根目录。 */
+    /** Open the file manager: back to the project root directory. */
     fun openProjectFiles() {
         loadFileDir("")
     }
 
-    /** 进入子目录（[path] 相对项目根）。 */
+    /** Enter a subdirectory ([path] is relative to the project root). */
     fun openFileDir(path: String) {
         loadFileDir(path)
     }
 
-    /** 返回上一层（根目录上是 no-op；UI 在根目录不渲染返回键）。 */
+    /** Go up one level (a no-op at the root; the UI renders no back button at the root). */
     fun fileDirUp() {
         val current = _uiState.value.filePath
         if (current.isEmpty()) return
@@ -403,10 +403,10 @@ class AgentViewModel(
     }
 
     /**
-     * 预览文件。会话底部的「新增文件」卡片与文件管理器共用这一个入口 —— 从哪儿进来
-     * 都是同一个页面、同一份内容，不存在两套预览逻辑。
+     * Preview a file. The "new files" card at the bottom of the chat and the file manager share this single
+     * entry point -- wherever you come from it is the same screen with the same content, never two preview code paths.
      *
-     * 二进制靠内容里的 NUL 字节判定（比扩展名白名单可靠）：不渲染乱码，直说类型不支持。
+     * Binary is detected by NUL bytes in the content (more reliable than an extension allowlist): no mojibake is rendered, it just says the type is unsupported.
      */
     fun openFilePreview(path: String) {
         val projectId = _uiState.value.currentProjectId
@@ -450,8 +450,8 @@ class AgentViewModel(
                     _uiState.update { it.copy(fileEntries = listing.entries, filesBusy = false) }
                 },
                 onFailure = {
-                    // 失败原因（路径逃逸 / 非目录）对用户没有操作价值，只报"读不到"，
-                    // 目录树留空 —— 比留一屏过期条目诚实。
+                    // The reason for the failure (path escape / not a directory) has no actionable value for the user, so only
+                    // "cannot read it" is reported and the tree is left empty -- more honest than a screen of stale entries.
                     _uiState.update {
                         it.copy(fileEntries = emptyList(), filesBusy = false, filesError = "无法读取该目录")
                     }
@@ -460,14 +460,14 @@ class AgentViewModel(
         }
     }
 
-    /** 切换会话：中止当前 run（原语义 —— 换会话 = 放弃这次执行）并重投影。 */
+    /** Switch session: abort the current run (original semantics -- switching sessions means abandoning this execution) and re-project. */
     fun openSession(sessionId: String) {
         if (_uiState.value.currentSessionId == sessionId) return
         runSupervisor.stop()
         switchToSession(sessionId)
     }
 
-    /** 只切投影、不动 run：[openSession] 的接管路径（Activity 重建后回到执行中的会话）。 */
+    /** Switch the projection only, leaving the run alone: [openSession]'s takeover path (returning to the executing session after an Activity recreation). */
     private fun switchToSession(sessionId: String) {
         _uiState.update { it.copy(currentSessionId = sessionId, runError = null) }
         viewModelScope.launch(ioDispatcher) {
@@ -476,7 +476,7 @@ class AgentViewModel(
         }
     }
 
-    /** 抽屉打开时的会话列表刷新入口（只列当前项目的会话）。 */
+    /** Entry point to refresh the session list when the drawer opens (lists only the current project's sessions). */
     fun refreshSessions() {
         viewModelScope.launch(ioDispatcher) {
             refreshProjectsAndSessions()
@@ -498,14 +498,14 @@ class AgentViewModel(
     private fun sessionsForCurrentProject(all: List<SessionRecord>): List<SessionRecord> =
         sessionsFor(all, _uiState.value.currentProjectId)
 
-    /** pre-v1.3 行（projectId=null）按默认项目归属渲染，绝不悬空。 */
+    /** pre-v1.3 rows (projectId=null) render as owned by the default project, never dangling. */
     private fun sessionsFor(all: List<SessionRecord>, projectId: String): List<SessionRecord> =
         all.filter { (it.projectId ?: ProjectLogic.DEFAULT_PROJECT_ID) == projectId }
 
-    // ----- 输入与运行 -----
+    // ----- Input and run -----
 
     /**
-     * 发送输入：空闲 → 启动一轮 run；运行中 → 降级为 Steer（下一步循环生效）。
+     * Send input: when idle -> start a run; while running -> degrade to Steer (takes effect on the next loop step).
      */
     fun send(text: String) {
         val trimmed = text.trim()
@@ -521,7 +521,7 @@ class AgentViewModel(
         }
     }
 
-    /** Q2：失败后的循环外层重启 —— 同一会话续跑，不追加任何用户消息。 */
+    /** Q2: loop restart from the outside after a failure -- resume in the same session without appending any user message. */
     fun retry() {
         val state = _uiState.value
         val sessionId = state.currentSessionId ?: return
@@ -530,9 +530,9 @@ class AgentViewModel(
     }
 
     /**
-     * 编辑历史提问并重新发送（分支语义）：在原消息的父节点下追加一条新 UserPrompt
-     * （新分支，旧分支保留），叶子推进到新分支后以 `initialPrompt=null` 重启循环
-     * ——循环直接 assemble 现有路径，无需重复入队。
+     * Edit a historical prompt and resend it (branch semantics): append a new UserPrompt under the parent of
+     * the original message (a new branch; the old branch is kept), then move the leaf to the new branch and restart
+     * the loop with `initialPrompt=null` -- the loop assembles the existing path directly, no re-enqueueing needed.
      */
     fun editAndResend(messageId: String, newText: String) {
         val trimmed = newText.trim()
@@ -550,7 +550,7 @@ class AgentViewModel(
         }
     }
 
-    /** 分支导航：‹ › 切换到相邻历史分支（叶子切到该分支的最新状态）。 */
+    /** Branch navigation: < > switch to an adjacent historical branch (the leaf moves to that branch's latest state). */
     fun switchBranch(messageId: String, direction: Int) {
         val state = _uiState.value
         if (state.running || state.currentSessionId == null) return
@@ -569,7 +569,7 @@ class AgentViewModel(
         }
     }
 
-    /** 运行中止（对齐 ChatGPT 的停止语义）：已落库节点保留，pending 节点由下次 run 清扫。 */
+    /** Run abort (matching ChatGPT's stop semantics): already-persisted nodes are kept; pending nodes are swept by the next run. */
     fun stopRun() {
         runSupervisor.stop()
     }
@@ -578,14 +578,14 @@ class AgentViewModel(
         approvalCoordinator.respond(allowed)
     }
 
-    /** 系统授权弹窗结果回灌（v1.2）。执行器仍会复查权限，这里只报告"用户做了什么选择"。 */
+    /** Feed back the result of the system grant dialog (v1.2). The executor still re-checks permissions; this only reports "what the user chose". */
     fun respondPermission(granted: Boolean) {
         permissionCoordinator.respond(granted)
     }
 
-    // ----- 服务商 / 模型选择 -----
+    // ----- Provider / model selection -----
 
-    /** 配置外部变更（agent 自改）后的选择态同步。 */
+    /** Sync the selection state after an external config change (agent self-edit). */
     private fun refreshSelection() {
         val selection = owner.selection()
         _uiState.update {
@@ -600,19 +600,19 @@ class AgentViewModel(
         }
     }
 
-    /** 设置页：切换自动批准（删除类不受影响，永远弹窗）。 */
+    /** Settings screen: toggle auto-approval (destructive calls are unaffected and always show a dialog). */
     fun setAutoApproveNonDestructive(enabled: Boolean) {
         owner.setAutoApproveNonDestructive(enabled)
         _uiState.update { it.copy(autoApproveNonDestructive = owner.autoApproveNonDestructive()) }
     }
 
-    /** 设置页：手动指定上下文预算；null = 回到自动推导（按模型上下文长度算）。 */
+    /** Settings screen: manually set the context budget; null = fall back to automatic derivation (computed from the model's context length). */
     fun setContextBudgetOverride(tokens: Int?) {
         owner.setContextBudgetOverride(tokens)
         _uiState.update { it.copy(contextBudget = owner.contextBudget()) }
     }
 
-    /** 顶栏动态切换模型：运行中拒绝（切换会重建运行时，打断当前 run）。 */
+    /** Top-bar dynamic model switch: rejected while running (switching rebuilds the runtime and would interrupt the current run). */
     fun selectModel(providerId: String, model: String) {
         if (_uiState.value.running) {
             _uiState.update { it.copy(runError = "正在运行中，请先停止当前任务再切换模型") }
@@ -624,19 +624,19 @@ class AgentViewModel(
         _uiState.update { it.copy(activeProviderId = providerId, activeModel = trimmed, modelConfigured = true) }
     }
 
-    /** 设置页：保存服务商 API Key。 */
+    /** Settings screen: save the provider's API key. */
     fun saveAccountKey(accountId: String, apiKey: String) {
         owner.saveAccountKey(accountId, apiKey)
         _uiState.update { it.copy(providerAccounts = owner.accounts()) }
     }
 
-    /** 设置页：新增自定义端点。 */
+    /** Settings screen: add a custom endpoint. */
     fun addCustomAccount(name: String, baseUrl: String, apiKey: String) {
         owner.upsertCustomAccount(name, baseUrl, apiKey)
         _uiState.update { it.copy(providerAccounts = owner.accounts()) }
     }
 
-    /** 设置页：删除自定义端点（若是当前选中，同步清空选择态）。 */
+    /** Settings screen: remove a custom endpoint (if it is the current selection, the selection state is cleared too). */
     fun removeCustomAccount(accountId: String) {
         owner.removeCustomAccount(accountId)
         val selection = owner.selection()
@@ -650,10 +650,10 @@ class AgentViewModel(
         }
     }
 
-    /** 对话屏/设置页：拉取某服务商的模型列表（GET /models）。 */
+    /** Chat screen / settings screen: fetch a provider's model list (GET /models). */
     suspend fun fetchModels(account: ProviderAccount): Result<List<String>> = owner.fetchModels(account)
 
-    // ----- 内部实现 -----
+    // ----- Internals -----
 
     private fun repository() = owner.current()?.repository
 
@@ -672,8 +672,8 @@ class AgentViewModel(
     }
 
     /**
-     * 启动一轮 run。驱动交给 [runSupervisor]（它自己拉前台服务保活），本 VM 只负责
-     * 前置校验与乐观的 UI 反馈；[AgentUiState.running] 的真实来源是 supervisor 的状态流。
+     * Start a run. Driving is handed to [runSupervisor] (it brings up the foreground service to stay alive
+     * itself); this VM only handles pre-checks and optimistic UI feedback. [AgentUiState.running]'s real source is the supervisor's state flow.
      */
     private fun startRun(sessionId: String, initialPrompt: String?) {
         if (owner.current() == null) {
@@ -686,15 +686,15 @@ class AgentViewModel(
 
     private suspend fun onEvent(event: AgentStepEvent) {
         when (event) {
-            // 运行中标记由 supervisor 的状态流维护（LoopStarted 时它已经是 true）。
+            // The running flag is maintained by the supervisor's state flow (it is already true by the time LoopStarted arrives).
             is AgentStepEvent.LoopStarted -> Unit
 
-            // 用户消息 / 转向落库即可见（不等下一轮 ModelTurn）。
+            // User messages / steers become visible as soon as they are persisted (no waiting for the next ModelTurn).
             is AgentStepEvent.InboundPersisted -> refreshConversation()
 
             is AgentStepEvent.ModelTurn -> {
-                // promptTokens 就是这一轮真正送进去的上下文大小 —— 压缩与否看的就是它，
-                // 所以直接把它当作"当前上下文用量"透出给设置页。
+                // promptTokens is exactly the context size actually sent in this turn -- that is what compaction looks at,
+                // so it is surfaced to the settings screen as the "current context usage" directly.
                 _uiState.update { it.copy(contextPromptTokens = event.promptTokens) }
                 refreshConversation()
             }
@@ -713,17 +713,17 @@ class AgentViewModel(
 
             is AgentStepEvent.CompactionSkipped -> Unit
 
-            // Follow-up 在下一次 drain 时才落库，随后的 ModelTurn 会触发刷新。
+            // Follow-ups are persisted only on the next drain, and the following ModelTurn triggers the refresh.
             is AgentStepEvent.FollowUpInjected -> Unit
 
             is AgentStepEvent.Completed -> {
-                // agent 可能在 run 内改过配置：落地待重建的变更（下一轮 run 生效）。
+                // The agent may have changed config during the run: land the pending rebuild (takes effect on the next run).
                 owner.rebuildRuntimeIfNeeded()
                 refreshSelection()
                 refreshConversation()
                 refreshTodos()
                 refreshSessions()
-                // 懒惰推送：本轮可能写过工作区，把产出送上云端。只推不拉；无改动时零网络。
+                // Lazy push: this run may have written to the workspace, so send the output to the cloud. Push only, never pull; zero network when nothing changed.
                 oneDrive.pushAfterRun(_uiState.value.currentProjectId)
             }
 
@@ -737,13 +737,13 @@ class AgentViewModel(
         }
     }
 
-    /** 以持久化事实为准重建对话投影（活跃路径 → UiMessage；全集节点提供分支信息）。 */
+    /** Rebuild the conversation projection from persisted facts (the active path -> UiMessage; the full node set provides branch info). */
     private suspend fun refreshConversation() {
         val sessionId = _uiState.value.currentSessionId ?: return
         val repository = repository() ?: return
         val path = withContext(ioDispatcher) { repository.activePath(sessionId) }
         val allNodes = withContext(ioDispatcher) { repository.listNodes(sessionId) }
-        // 改动记录与节点同源：投影会话时一并把 diff 贴回对应工具条目（v1.5）。
+        // The change log shares its source with the nodes: while projecting the conversation the diffs are pasted back onto the matching tool entries (v1.5).
         val changes = withContext(ioDispatcher) { projectFiles.changes(sessionId) }
         val messages = ConversationRenderer.render(path, allNodes, changes) { node -> repository.payload(node) }
         val title = withContext(ioDispatcher) { repository.getSession(sessionId)?.title }
@@ -753,8 +753,8 @@ class AgentViewModel(
     }
 
     /**
-     * 底部「新增文件」卡片的数据：本会话新建、且**此刻仍然存在**的文件，同一路径重复创建
-     * 只留最新一笔。被删掉/移走的文件不留在卡片里 —— 点进去是 404 的入口不如没有。
+     * Data for the "new files" card at the bottom: files created in this session that **still exist right now**;
+     * repeated creations at the same path keep only the latest entry. Deleted / moved files do not stay on the card -- an entry that opens a 404 is worse than none.
      */
     private fun newFilesOf(changes: List<FileChange>): List<FileChange> {
         if (changes.isEmpty()) return emptyList()

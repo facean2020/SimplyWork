@@ -6,23 +6,23 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * HITL 审批协调器（agent-core-design.md §8.2 A4 / §12 Q1）：实现 `AuditApprovalHandler`
- * 的 UI 侧语义 —— `request` 挂起等待用户决策，决策经 [respond] 回灌。
+ * HITL approval coordinator (agent-core-design.md §8.2 A4 / §12 Q1): implements the UI-side semantics
+ * of `AuditApprovalHandler` -- `request` suspends until the user decides, and the decision is fed back via [respond].
  *
- * 单请求假设：Agent Loop 在 collector 协程里串行调用 `preToolAudit`，同一时刻至多
- * 一个审批挂起；运行被取消时 `await` 以 CancellationException 退出，`finally` 清空
- * 挂起状态（不会残留幽灵弹窗）。
+ * Single-request assumption: the Agent Loop calls `preToolAudit` serially inside the collector coroutine, so
+ * at most one approval is pending at a time; when the run is cancelled, `await` exits with CancellationException
+ * and `finally` clears the pending state (no ghost dialog left behind).
  */
 class ApprovalCoordinator {
 
     private val _requests = MutableStateFlow<ApprovalRequest?>(null)
 
-    /** 当前挂起的审批请求；非空时 UI 显示审批对话框。 */
+    /** The approval request currently pending; when non-null the UI shows the approval dialog. */
     val pending: StateFlow<ApprovalRequest?> = _requests.asStateFlow()
 
     private var deferred: CompletableDeferred<Boolean>? = null
 
-    /** 由 AuditApprovalHandler 调用：挂起直至用户决策或运行取消。 */
+    /** Called by AuditApprovalHandler: suspends until the user decides or the run is cancelled. */
     suspend fun request(toolName: String, argsJson: String): Boolean {
         val pendingDeferred = CompletableDeferred<Boolean>()
         deferred = pendingDeferred
@@ -35,7 +35,7 @@ class ApprovalCoordinator {
         }
     }
 
-    /** 用户决策入口：true 允许 / false 拒绝。无挂起请求时为 no-op。 */
+    /** Entry point for the user's decision: true allows / false denies. No-op when nothing is pending. */
     fun respond(allowed: Boolean) {
         deferred?.complete(allowed)
     }

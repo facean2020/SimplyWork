@@ -288,8 +288,8 @@ class SessionRepositoryImpl(
     }
 
     override suspend fun deleteSession(sessionId: String) {
-        // 结构先删、payload 后删：反过来的话中途被杀会剩下一行指向不存在 payload 的
-        // node（读它就抛 PayloadMissing），而先删结构最多留一个读不到的死文件。
+        // Structure first, payload after: the other way round, being killed midway leaves a row pointing at a payload that does not
+        // exist (reading it throws PayloadMissing), whereas deleting the structure first at worst leaves an unreadable dead file.
         mutex.withLock {
             structureStore.deleteSession(sessionId)
             payloadStore.delete(sessionId)

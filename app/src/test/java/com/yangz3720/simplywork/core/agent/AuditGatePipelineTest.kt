@@ -110,7 +110,7 @@ class AuditGatePipelineTest {
         assertTrue(direct is AuditGatePipeline.AuditDecision.Denied)
     }
 
-    // ----- 自动批准（v1.1）：只有不可逆的调用才留给人 -----
+    // ----- auto-approve (v1.1): only irreversible calls are left to a human -----
 
     @Test
     fun `A6 auto-approve passes non-destructive confirmations without asking`() = runTest {
@@ -127,7 +127,7 @@ class AuditGatePipelineTest {
 
         assertTrue(gate.preToolAudit(call("location")) is AuditGatePipeline.AuditDecision.Approved)
         assertTrue(gate.preToolAudit(call("open_app")) is AuditGatePipeline.AuditDecision.Approved)
-        // 关键：不是"自动答了是"，而是**根本没问** —— 否则弹窗还会闪一下
+        // the point: not "answered yes automatically" but **never asked at all** -- else the dialog would still flash
         assertEquals(0, asked)
     }
 
@@ -144,7 +144,7 @@ class AuditGatePipelineTest {
         )
 
         val decision = gate.preToolAudit(call("fs_delete"))
-        // 一个能被开关关掉的删除确认等于没有确认：destructive 与 autoApprove 无关。
+        // a delete confirmation a toggle can switch off is no confirmation at all: destructive has nothing to do with autoApprove.
         assertEquals(1, asked)
         assertTrue(decision is AuditGatePipeline.AuditDecision.Denied)
     }
@@ -193,7 +193,7 @@ class AuditGatePipelineTest {
             gate.preToolAudit(call("calendar", """{"x":"EDITOR_INTENT"}"""))
                 is AuditGatePipeline.AuditDecision.Approved
         )
-        // 提升到 USER_CONFIRMING 但不可逆 → 自动批准，仍不问
+        // elevated to USER_CONFIRMING but irreversible -> auto-approved, still without asking
         assertTrue(
             gate.preToolAudit(call("calendar", """{"x":"DIRECT_WRITE"}"""))
                 is AuditGatePipeline.AuditDecision.Approved

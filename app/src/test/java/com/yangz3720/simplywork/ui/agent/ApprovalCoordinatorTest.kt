@@ -8,7 +8,7 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
- * HITL 审批协调器（Q1 缝）行为：挂起等待 → 决策回灌 → 状态清理。
+ * HITL approval coordinator (seam Q1) behaviour: suspend and wait -> decision fed back -> state cleanup.
  */
 class ApprovalCoordinatorTest {
 
@@ -59,7 +59,7 @@ class ApprovalCoordinatorTest {
     @Test
     fun `respond with no pending request is a no-op`() {
         val coordinator = ApprovalCoordinator()
-        coordinator.respond(true) // 不抛异常即可
+        coordinator.respond(true) // not throwing is enough
         assertNull(coordinator.pending.value)
     }
 }

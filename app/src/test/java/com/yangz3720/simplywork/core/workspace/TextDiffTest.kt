@@ -6,8 +6,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * TextDiff 纯函数测试：差异行、精确行数、以及"算不出来就承认"的两条边界
- * （差异区过大 / 单行过长）。
+ * TextDiff pure-function tests: diff lines, exact line counts, and the two boundaries where it admits
+ * it cannot compute one (diff region too large / single line too long).
  */
 class TextDiffTest {
 

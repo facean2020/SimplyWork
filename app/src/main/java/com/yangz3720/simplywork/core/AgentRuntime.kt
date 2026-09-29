@@ -17,6 +17,7 @@ import com.yangz3720.simplywork.core.agent.tool.AgentToolRegistry
 import com.yangz3720.simplywork.core.agent.tool.RegisteredTool
 import com.yangz3720.simplywork.core.agent.tool.SystemOpsToolAdapter
 import com.yangz3720.simplywork.core.agent.tool.TodoTool
+import com.yangz3720.simplywork.core.agent.tool.WaitTool
 import com.yangz3720.simplywork.core.session.SessionRepository
 import com.yangz3720.simplywork.core.session.SessionRepositoryImpl
 import com.yangz3720.simplywork.core.session.store.JsonlPayloadStore
@@ -77,13 +78,19 @@ class AgentRuntime private constructor(
             skillInjector: SkillInjector = SkillInjector.None,
             summarizer: com.yangz3720.simplywork.core.agent.Summarizer = ModelSummarizer(provider),
             approvalHandler: AuditApprovalHandler = AuditApprovalHandler.AutoApprove,
-            // v1.3 自操作工具（self_* / fs_* / project）：AppContainer 注入缝；缺省不注册（单元测试零改动）。
+            // Tools injected by the composition root (v1.3 self_* / fs_* / project; v1.6 adds the
+            // js_* sandbox tools that need an Android context): not registered by default (zero
+            // changes to unit tests).
             selfOps: ((repository: SessionRepository) -> List<RegisteredTool>)? = null
         ): AgentRuntime {
             val repository = SessionRepositoryImpl(structureStore, payloadStore)
             val registry = AgentToolRegistry()
             SystemOpsToolAdapter.registerAll(registry, router)
             registry.register(TodoTool.registeredTool(repository))
+            // v1.6: pure wait (it depends on nothing, so it is registered unconditionally; the
+            // sandbox-style tools need an Android context and are injected by AppContainer through
+            // the selfOps seam, see SelfOpsTools).
+            registry.register(WaitTool.registeredTool())
             selfOps?.invoke(repository)?.forEach(registry::register)
 
             val queue = MessageQueueManager()

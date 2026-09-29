@@ -80,11 +80,11 @@ class JsonlPayloadStoreTest {
 
         store.delete("s1")
 
-        // 落盘文件与内存索引都要消失：索引留着会让读命中已删文件的旧偏移量
+        // both the on-disk file and the in-memory index must disappear: a surviving index would let a read hit the stale offset of a deleted file
         assertFalse(File(dir, "s1.jsonl").exists())
         assertNull(store.read("s1", "n1"))
         assertTrue(store.loadAll("s1").isEmpty())
-        // 别的会话不受影响
+        // other sessions are unaffected
         assertEquals(
             "two",
             Json.parseToJsonElement(store.read("s2", "n2")!!).jsonObject["content"]!!.jsonPrimitive.content
