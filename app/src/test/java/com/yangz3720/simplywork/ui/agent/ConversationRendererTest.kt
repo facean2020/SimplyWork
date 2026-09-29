@@ -20,7 +20,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ConversationRenderer 纯函数测试：DAG 活跃路径 → UiMessage 投影。
+ * ConversationRenderer pure-function tests: DAG active path -> UiMessage projection.
  */
 class ConversationRendererTest {
 
@@ -40,7 +40,7 @@ class ConversationRendererTest {
     private fun render(vararg pairs: Pair<SessionNode, JsonObject>): List<UiMessage> =
         ConversationRenderer.render(pairs.map { it.first }) { node -> pairs.first { it.first.id == node.id }.second }
 
-    // ----- 用例 -----
+    // ----- cases -----
 
     @Test
     fun `user prompt renders as user message`() {
@@ -150,14 +150,14 @@ class ConversationRendererTest {
         assertTrue(messages[0].isError)
     }
 
-    // ----- 分支信息（编辑重发） -----
+    // ----- branch info (edit and resend) -----
 
     @Test
     fun `user prompt carries branch index and count from sibling prompts`() {
         val u1 = node("u1", SessionNodeType.UserPrompt) { messagePayload(Message.User("原提问")) }
         val u2 = node("u2", SessionNodeType.UserPrompt) { messagePayload(Message.User("编辑后的提问")) }
 
-        // 活跃路径只含新分支 u2；全集含两个兄弟
+        // The active path contains only the new branch u2; the full set contains both siblings
         val messages = ConversationRenderer.render(
             listOf(u2.first),
             listOf(u1.first, u2.first)
@@ -176,7 +176,7 @@ class ConversationRendererTest {
         assertEquals(1, messages[0].branchCount)
     }
 
-    // ----- 改动卡片（v1.5） -----
+    // ----- change cards (v1.5) -----
 
     private fun writeNode() = node("a", SessionNodeType.ToolCall) {
         messagePayload(

@@ -32,18 +32,18 @@ import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
 
 /**
- * 文件预览页（v1.5）：Markdown 渲染 / 纯文本等宽 / 明说"不支持"。
+ * File preview page (v1.5): Markdown rendering / monospace plain text / an explicit "not supported".
  *
- * 两个入口共用这一个页面：会话底部的「新增文件」卡片，和文件管理器里的文件行 ——
- * 所以"从哪进来"不影响看到什么。
+ * Both entry points share this one page: the "new files" card at the bottom of the session, and a file row in the file manager --
+ * so "how you got here" does not change what you see.
  *
- * v1.1：允许**上拉成整页**。原先 `skipPartiallyExpanded = true` 且内容高度写死
- * （560dp / 正文 400dp），所以面板“展开”也只有半个屏幕 —— 读文档时等于永远读一个小窗。
- * 现在初始停在半开态，往上拉就铺满整屏：内容 `fillMaxHeight()`、正文 `weight(1f)`，
- * 展开时正文自然占满剩余空间。
+ * v1.1: allow **pulling up to a full page**. Before, `skipPartiallyExpanded = true` and the content height was hard-coded
+ * (560dp / body 400dp), so "expanding" the sheet was still only half a screen -- reading a document meant forever reading through a small window.
+ * Now it starts at the half-open state and a pull-up fills the whole screen: content `fillMaxHeight()`, body `weight(1f)`, so when
+ * expanded the body naturally takes the remaining space.
  *
- * 正文用 [verticalScroll] 而不是列表：Markdown 渲染器自身是普通 Column，套惰性列表
- * 只会得到同向嵌套滚动（崩）。滚的是正文本身，而它现在有多高就滚多高。
+ * The body uses [verticalScroll] rather than a list: the Markdown renderer is itself a plain Column, and wrapping a lazy list
+ * around it only yields same-direction nested scrolling (a crash). What scrolls is the body itself, and it scrolls as tall as it now is.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -89,7 +89,7 @@ fun FilePreviewSheet(preview: FilePreview, onDismiss: () -> Unit) {
             ) {
                 val text = preview.text
                 if (text == null) {
-                    // 没有内容可显示时不留白屏：说明为什么（二进制 / 读不到）。
+                    // When there is nothing to show, don't leave a blank screen: state why (binary / unreadable).
                     Text(
                         text = preview.notice ?: "没有可显示的内容",
                         style = MaterialTheme.typography.bodyMedium,
@@ -119,7 +119,7 @@ fun FilePreviewSheet(preview: FilePreview, onDismiss: () -> Unit) {
                         color = MaterialTheme.colorScheme.onBackground
                     )
                 }
-                // 截断/不可预览的理由跟在正文后面，读者不会误以为这就是全文。
+                // The reason for truncation / no preview follows the body, so the reader won't mistake this for the full text.
                 preview.notice?.takeIf { text != null }?.let { notice ->
                     Spacer(Modifier.size(8.dp))
                     Text(
@@ -134,8 +134,8 @@ fun FilePreviewSheet(preview: FilePreview, onDismiss: () -> Unit) {
 }
 
 /**
- * 文档标题梯度。库默认把 h1..h6 映射到 displayLarge/Medium/Small（手机上 36~57sp），
- * 在阅读页里过大；这里压到能读的区间，仍保留大中小可辨（正文 bodyMedium=14sp）。
+ * Document heading scale. The library by default maps h1..h6 to displayLarge/Medium/Small (36~57sp on a phone),
+ * which is too large on a reading page; here we press it into a readable range while keeping large/medium/small distinguishable (body text bodyMedium=14sp).
  */
 private fun documentHeading(base: TextStyle, size: TextUnit): TextStyle =
     base.copy(fontSize = size, fontWeight = FontWeight.Bold)

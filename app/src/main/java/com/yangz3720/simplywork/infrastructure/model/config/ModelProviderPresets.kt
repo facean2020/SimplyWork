@@ -3,8 +3,8 @@ package com.yangz3720.simplywork.infrastructure.model.config
 import kotlinx.serialization.Serializable
 
 /**
- * 一个服务商账号：预设（OpenRouter/DeepSeek/Qwen/OpenAI）或自定义端点。
- * 多服务商并存，各只保存 API Key；模型在对话界面顶栏动态选择（不再随配置固化）。
+ * One provider account: a preset (OpenRouter/DeepSeek/Qwen/OpenAI) or a custom endpoint.
+ * Several providers coexist, each storing only its API key; the model is picked dynamically in the chat UI top bar (no longer baked into the config).
  */
 @Serializable
 data class ProviderAccount(
@@ -14,7 +14,7 @@ data class ProviderAccount(
     val apiKey: String = ""
 )
 
-/** 内置 OpenAI 兼容端点预设。 */
+/** Built-in OpenAI-compatible endpoint presets. */
 object ModelProviderPresets {
 
     val ALL: List<ProviderAccount> = listOf(
@@ -24,7 +24,7 @@ object ModelProviderPresets {
         ProviderAccount(id = "openai", name = "OpenAI", baseUrl = "https://api.openai.com/v1")
     )
 
-    /** 按 baseUrl 匹配预设（legacy 迁移用）。 */
+    /** Match a preset by baseUrl (used by legacy migration). */
     fun matchBaseUrl(baseUrl: String): ProviderAccount? =
         ALL.firstOrNull { it.baseUrl == baseUrl.trim() }
 }

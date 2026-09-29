@@ -70,7 +70,7 @@ class InMemoryPayloadStore : PayloadStore {
 
     private val payloads = ConcurrentHashMap<String, String>()
 
-    /** nodeId -> sessionId，只为 [delete] 能整会话清干净（[payloads] 只按 nodeId 索引）。 */
+    /** nodeId -> sessionId, only so that [delete] can clear a whole session cleanly ([payloads] is indexed by nodeId alone). */
     private val sessionOf = ConcurrentHashMap<String, String>()
 
     override fun append(sessionId: String, nodeId: String, nodeType: String, payloadJson: String): PayloadLocation {

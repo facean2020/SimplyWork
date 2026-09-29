@@ -13,9 +13,9 @@ import com.yangz3720.simplywork.core.workspace.FileChange
 import com.yangz3720.simplywork.infrastructure.model.config.ProviderAccount
 
 /**
- * UI 消息模型 — 会话 DAG 节点在界面上的投影（agent-core-design.md §2.1 → UI）。
- * 一对一映射（SystemPrompt(base) 除外）；工具调用与其结果通过 [toolCallId] 归并到
- * 同一条活动条目。
+ * UI message model -- the projection of session DAG nodes onto the UI (agent-core-design.md §2.1 -> UI).
+ * One-to-one mapping (SystemPrompt(base) excepted); a tool call and its result are merged via [toolCallId] into
+ * the same activity entry.
  */
 data class UiMessage(
     val id: String,
@@ -31,49 +31,49 @@ data class UiMessage(
     val toolResult: String? = null,
     val toolResultIsError: Boolean = false,
 
-    /** 分支信息（UserPrompt 专用）：同一位置的第 [branchIndex] 个分支 / 共 [branchCount] 个。 */
+    /** Branch info (UserPrompt only): the [branchIndex]-th branch at this position / out of [branchCount] branches. */
     val branchIndex: Int = 0,
     val branchCount: Int = 1,
 
     /**
-     * v1.5：这次工具调用对工作区文件做了什么（fs_write/fs_move/fs_delete）。
-     * 由 [ConversationRenderer] 按 toolCallId 挂上，工具条目下渲染成 diff 卡片。
+     * v1.5: what this tool call did to workspace files (fs_write/fs_move/fs_delete).
+     * Attached by [ConversationRenderer] keyed by toolCallId, rendered under the tool entry as a diff card.
      */
     val fileChange: FileChange? = null
 )
 
 enum class UiMessageKind {
-    /** 用户消息（右对齐气泡）。 */
+    /** User message (right-aligned bubble). */
     User,
 
-    /** 助手正文（无气泡纯排版）。 */
+    /** Assistant body text (no bubble, pure typography). */
     Assistant,
 
-    /** 工具活动时间线条目（签名元素：状态点 + 名称 + 可展开参数/结果）。 */
+    /** Tool activity timeline entry (the signature element: status dot + name + expandable args/result). */
     ToolActivity,
 
-    /** 运行中用户转向（Steer）。 */
+    /** User steer while a run is in flight (Steer). */
     Steer,
 
-    /** 完成度守卫注入的 follow-up（SystemPrompt kind=follow_up）。 */
+    /** Follow-up injected by the completeness guard (SystemPrompt kind=follow_up). */
     FollowUp,
 
-    /** 上下文压缩产出的 Episode 摘要。 */
+    /** Episode summary produced by context compaction. */
     Summary,
 
-    /** 系统级备注（payload 缺失等显式异常的 UI 呈现）。 */
+    /** System-level note (the UI rendering of explicit anomalies such as a missing payload). */
     SystemNote
 }
 
-/** HITL 审批请求（AuditApprovalHandler 的 UI 侧投影，Q1）。 */
+/** HITL approval request (the UI-side projection of AuditApprovalHandler, Q1). */
 data class ApprovalRequest(
     val toolName: String,
     val argsJson: String
 )
 
 /**
- * 运行时权限申请请求（`SystemPermissionRequester` 的 UI 侧投影，v1.2 / P4）：
- * 基础设施只报告缺哪些权限与理由，弹什么、何时弹由 UI 层决定。
+ * Runtime permission request (the UI-side projection of `SystemPermissionRequester`, v1.2 / P4):
+ * infrastructure only reports which permissions are missing and the rationale; what to show and when to show it is decided by the UI layer.
  */
 data class PermissionRequest(
     val permissions: List<String>,
@@ -82,68 +82,68 @@ data class PermissionRequest(
 
 /**
  * One screen of the agent UI: conversation projection + run state + sessions.
- * MVI 单一状态（architecture.md `AgentViewModel`）。
+ * MVI single state (architecture.md `AgentViewModel`).
  */
 data class AgentUiState(
     val sessions: List<SessionRecord> = emptyList(),
     val currentSessionId: String? = null,
-    /** 当前会话标题；null = 尚未落库的新对话。 */
+    /** Current session title; null = a new conversation not yet persisted. */
     val currentTitle: String? = null,
     val messages: List<UiMessage> = emptyList(),
     val running: Boolean = false,
     val iteration: Int = 0,
-    /** 最近一次 Failed 的可读原因；非空时 UI 显示重试入口（Q2 循环外层重启）。 */
+    /** Human-readable reason for the most recent Failed; when non-null the UI shows a retry entry point (Q2 outer-loop restart). */
     val runError: String? = null,
     val todos: List<TodoItem> = emptyList(),
 
-    /** 服务商账号列表（各存各的密钥；顶栏选择器数据源）。 */
+    /** Provider account list (each keeps its own API key; the data source for the top-bar picker). */
     val providerAccounts: List<ProviderAccount> = emptyList(),
-    /** 当前选中的服务商 + 模型（对话屏顶栏显示与动态切换）。 */
+    /** Currently selected provider + model (shown in the conversation screen's top bar and switched live). */
     val activeProviderId: String? = null,
     val activeModel: String = "",
 
-    /** 项目列表 + 当前项目（v1.3）：会话过滤 + fs_* 沙箱默认目录。 */
+    /** Project list + current project (v1.3): session filtering + the default directory for the fs_* sandbox. */
     val projects: List<Project> = emptyList(),
     val currentProjectId: String = ProjectLogic.DEFAULT_PROJECT_ID,
 
-    /** OneDrive（v1.4）：账号、配置就绪标志与同步状态。 */
+    /** OneDrive (v1.4): account, configuration-ready flag and sync state. */
     val oneDriveAccount: OneDriveAccount? = null,
     val oneDriveConfigured: Boolean = false,
     val syncState: SyncState = SyncState.Idle,
 
-    /** 云端文件夹选择器的当前层（层级栈由弹层自己维护，这里只放要渲染的内容）。 */
+    /** Current level of the cloud folder picker (the level stack is maintained by the sheet itself; this only holds what to render). */
     val cloudFolders: List<CloudFolder> = emptyList(),
     val cloudBusy: Boolean = false,
     val cloudError: String? = null,
 
-    /** 项目文件管理器（v1.5）：当前层路径、条目、忙碌与错误。 */
+    /** Project file manager (v1.5): current level's path, entries, busy and error. */
     val filePath: String = "",
     val fileEntries: List<AgentWorkspace.Entry> = emptyList(),
     val filesBusy: Boolean = false,
     val filesError: String? = null,
 
-    /** 文件预览（null = 关闭）。 */
+    /** File preview (null = closed). */
     val filePreview: FilePreview? = null,
 
     /**
-     * 当前会话**新建**的文件（底部小卡片）：点一行即跳该文件的预览。
-     * 只含此刻仍存在的文件 —— 后来被删掉/移走的不会留在卡片里。
+     * Files **newly created** in the current session (the small card at the bottom): tapping a row jumps straight to that file's preview.
+     * Only contains files that still exist right now -- anything deleted or moved away later does not linger on the card.
      */
     val newFiles: List<FileChange> = emptyList(),
 
     /**
-     * v1.1：非删除类调用自动批准（用户开关）。删除类调用不受它影响，永远弹窗。
+     * v1.1: auto-approve non-destructive calls (a user toggle). Destructive calls are unaffected by it and always prompt.
      */
     val autoApproveNonDestructive: Boolean = true,
 
     /**
-     * v1.1：当前模型的上下文预算 + 它从哪来（设置页如实展示，见 `ContextBudgetPlan`）。
+     * v1.1: the current model's context budget + where it came from (the settings page shows it faithfully, see `ContextBudgetPlan`).
      */
     val contextBudget: ContextBudgetPlan? = null,
 
     /**
-     * v1.1：最近一轮请求真正送进去的上下文 token 数（= 模型返回的 promptTokens）。
-     * 它才是"当前上下文用量"，累计值只会单调增长、看不出该不该压缩。
+     * v1.1: the context token count actually sent in the most recent request (= the promptTokens the model returned).
+     * That is the real "current context usage"; a cumulative total only grows monotonically and cannot tell you whether compaction is due.
      */
     val contextPromptTokens: Int = 0,
 
@@ -151,10 +151,10 @@ data class AgentUiState(
 )
 
 /**
- * 文件预览页的内容（v1.5）。
+ * Contents of the file preview page (v1.5).
  *
- * [text] 为 null 表示**不显示内容**，原因在 [notice]：二进制、读取失败等。
- * 区分"内容为空"和"没有内容可显示"是刻意的 —— 前者渲染空白页，后者必须给出理由。
+ * [text] being null means **no content is displayed**, and the reason lives in [notice]: binary, read failure, etc.
+ * Separating "the content is empty" from "there is no content to show" is deliberate -- the former renders a blank page, the latter must state a reason.
  */
 data class FilePreview(
     val path: String,

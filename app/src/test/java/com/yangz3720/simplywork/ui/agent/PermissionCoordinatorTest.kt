@@ -10,8 +10,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 运行时权限协调器（v1.2 / P4 缝）行为：挂起等待 → 系统授权结果回灌 → 状态清理。
- * 与 [ApprovalCoordinatorTest] 同构，额外覆盖交给基础设施的适配器形状。
+ * Runtime permission coordinator (v1.2 / seam P4) behaviour: suspend and wait -> system grant result fed back -> state cleanup.
+ * Isomorphic to [ApprovalCoordinatorTest], with extra coverage of the adapter shape handed to the infrastructure.
  */
 class PermissionCoordinatorTest {
 
@@ -85,7 +85,7 @@ class PermissionCoordinatorTest {
     @Test
     fun `respond with no pending request is a no-op`() {
         val coordinator = PermissionCoordinator()
-        coordinator.respond(true) // 不抛异常即可
+        coordinator.respond(true) // not throwing is enough
         assertNull(coordinator.pending.value)
     }
 
@@ -107,8 +107,8 @@ class PermissionCoordinatorTest {
     }
 
     /**
-     * 复核 S10：串行假设被打破（竞态/重建）时，第二个 request 不允许让第一个调用方
-     * 永久悬空 —— 旧请求按"未授予"收敛，且 finally 清理不得误伤新请求的挂起态。
+     * Re-checking S10: when the serial assumption is broken (race / recreation), a second request must not
+     * leave the first caller dangling forever -- the old request converges on "not granted", and the finally cleanup must not clobber the new request's pending state.
      */
     @Test
     fun `overlapping request resolves the earlier one without clobbering state`() = runTest {

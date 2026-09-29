@@ -3,25 +3,25 @@ package com.yangz3720.simplywork.core.workspace
 import kotlinx.serialization.Serializable
 
 /**
- * 行级差异（v1.5「改动卡片」的唯一计算点）。纯函数、无 IO → JVM 直接可测。
+ * Line-level diff (the single computation point of the v1.5 "change card"). Pure functions, no IO → directly testable on the JVM.
  *
- * 三段式：先剥掉公共前后缀（`O(n)`，覆盖"追加 / 小改"这两种绝大多数场景），只对**中间
- * 差异区**求 LCS。差异区超过 [MAX_LCS_LINES] 时不做比较，返回 `null` 计数 —— 256KB 的
- * 两个大文件做 DP 是 25M 格，会直接拖死界面；而"整块替换"冒充精确 diff 是撒谎。
- * 宁可承认给不出数字，也不给错数字（P2）。
+ * Three stages: first strip the common prefix and suffix (`O(n)`, covering "append / small edit", the vast majority of cases), then run LCS only
+ * on the **middle diff region**. When that region exceeds [MAX_LCS_LINES] no comparison is done and `null` counts are returned -- a DP over two
+ * 256KB files is 25M cells and would freeze the UI outright; and passing off a whole-block replacement as a precise diff is lying.
+ * Better to admit we cannot give numbers than to give wrong ones (P2).
  *
- * 新建 / 清空（一侧为空）走特判：全是增行或全是删行，**不**受 LCS 上限约束，所以
- * 新建大文件依然有精确行数。
+ * Create / clear (one side empty) takes a special path: all-added or all-removed lines, **not** bound by the LCS cap, so
+ * creating a large file still has exact line counts.
  */
 object TextDiff {
 
     @Serializable
     enum class LineKind { Context, Added, Removed }
 
-    /** 一行差异。[text] 已按 [MAX_LINE_CHARS] 截断（压缩成一行的巨型 JSON 不能撑爆记录）。 */
+    /** One diff line. [text] is already truncated per [MAX_LINE_CHARS] (a giant JSON squashed onto one line must not blow up the record). */
     @Serializable
     data class Line(val kind: LineKind, val text: String) {
-        /** 统一 diff 前缀字符（UI 直接拼在最前面，不额外着色语义）。 */
+        /** Unified-diff prefix character (the UI prepends it directly and does not colour semantics on top). */
         val prefix: Char
             get() = when (kind) {
                 LineKind.Added -> '+'
@@ -31,9 +31,9 @@ object TextDiff {
     }
 
     /**
-     * @param lines 带少量上下文的差异行，最多 `maxLines` 行。
-     * @param addedLines / [removedLines] 全量行数；`null` = 差异区过大未做精确比较。
-     * @param omittedLines [lines] 之后没带出来的行数（UI 明说省略了多少，不静默吞掉）。
+     * @param lines Diff lines with a little context, at most `maxLines` lines.
+     * @param addedLines / [removedLines] Full line counts; `null` = the diff region was too large for an exact comparison.
+     * @param omittedLines Lines not carried out after [lines] (the UI states how many were omitted, it does not silently swallow them).
      */
     data class Result(
         val lines: List<Line>,
@@ -42,10 +42,10 @@ object TextDiff {
         val omittedLines: Int = 0
     )
 
-    /** 中间差异区超过这个行数就放弃精确比较（`400×400` 的 DP 已是 ~640KB 中间表）。 */
+    /** Exact comparison is abandoned once the middle diff region exceeds this many lines (a `400×400` DP is already a ~640KB table). */
     const val MAX_LCS_LINES = 400
 
-    /** 单行最长字符数。 */
+    /** Maximum characters in one line. */
     const val MAX_LINE_CHARS = 400
 
     fun compute(
@@ -61,7 +61,7 @@ object TextDiff {
         val suffix: Int
         val ops: List<Op>
         if (a.isEmpty() || b.isEmpty()) {
-            // 新建 / 删除 / 清空：一侧整体不存在，没有可比较的东西，也无需 LCS。
+            // Create / delete / clear: one side does not exist at all, there is nothing to compare and no LCS is needed.
             prefix = 0
             suffix = 0
             ops = if (a.isEmpty()) b.map { Op(LineKind.Added, it) } else a.map { Op(LineKind.Removed, it) }
@@ -84,14 +84,14 @@ object TextDiff {
             ops = lcs(aMid, bMid)
         }
 
-        // 内容完全相同：不是"改了零行"，而是"没有改动"，连上下文都不该渲染。
+        // Identical content: this is not "zero lines changed" but "no change at all", so not even context should be rendered.
         if (ops.isEmpty()) return Result(emptyList(), 0, 0)
 
         val added = ops.count { it.kind == LineKind.Added }
         val removed = ops.count { it.kind == LineKind.Removed }
 
         val all = ArrayList<Line>(ops.size + contextLines * 2)
-        // 上下文取自**原文**：差异区两侧各留 contextLines 行，读者才知道改在哪。
+        // Context comes from the **before** text: contextLines lines kept on each side of the diff region, so the reader can see where the change is.
         a.subList(maxOf(0, prefix - contextLines), prefix).forEach { all += Line(LineKind.Context, clip(it)) }
         ops.forEach { all += Line(it.kind, clip(it.text)) }
         val tail = minOf(suffix, contextLines)
@@ -103,7 +103,7 @@ object TextDiff {
 
     private data class Op(val kind: LineKind, val text: String)
 
-    /** 经典 LCS 回溯；[MAX_LCS_LINES] 已保证这里的规模有界。 */
+    /** Classic LCS backtrack; [MAX_LCS_LINES] already keeps the size here bounded. */
     private fun lcs(a: List<String>, b: List<String>): List<Op> {
         val n = a.size
         val m = b.size
@@ -126,7 +126,7 @@ object TextDiff {
                 a[i] == b[j] -> {
                     ops += Op(LineKind.Context, a[i]); i++; j++
                 }
-                // 平局取"删"：与多数 diff 工具一致，删在前、增在后。
+                // A tie goes to "removed": consistent with most diff tools -- removals first, additions after.
                 dp[(i + 1) * width + j] >= dp[i * width + j + 1] -> {
                     ops += Op(LineKind.Removed, a[i]); i++
                 }
@@ -145,8 +145,8 @@ object TextDiff {
     }
 
     /**
-     * 空文本 = 零行；结尾的换行符**终止**最后一行，不额外产生一个空行 —— 否则
-     * `"x\ny\n"` 与 `"x\ny"` 会被当成"多了一行空行"，纯噪声。
+     * Empty text = zero lines; a trailing newline **terminates** the last line and does not produce an extra empty line -- otherwise
+     * `"x\ny\n"` and `"x\ny"` would be treated as "one extra empty line", pure noise.
      */
     private fun toLines(text: String): List<String> {
         if (text.isEmpty()) return emptyList()

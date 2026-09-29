@@ -10,8 +10,8 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 
 /**
- * 双向镜像引擎的行为契约（v1.4）。全部走内存 fake 云端 + 真实文件系统：
- * 镜像的正确性几乎全在"谁动过、谁该覆盖谁"的判断上，这层必须锁住。
+ * The behavioural contract of the two-way mirror engine (v1.4). It all runs against an in-memory fake
+ * cloud plus a real filesystem: mirror correctness is almost entirely about judging "who touched it, who should override whom", so this layer has to be locked down.
  */
 class ProjectSyncEngineTest {
 
@@ -25,11 +25,11 @@ class ProjectSyncEngineTest {
     private fun engine(ws: AgentWorkspace) =
         ProjectSyncEngine(ws, SyncManifestStore(File(tmp.root, "sync")))
 
-    /** 把镜像上限压小的版本：跳过逻辑就能用真实小文件覆盖，不必造 16 MiB。 */
+    /** The same engine with a squeezed mirror cap: the skip logic can then be covered with real small files instead of forging 16 MiB. */
     private fun engine(ws: AgentWorkspace, maxSyncFileBytes: Long) =
         ProjectSyncEngine(ws, SyncManifestStore(File(tmp.root, "sync")), maxSyncFileBytes = maxSyncFileBytes)
 
-    // ----- 首次绑定：两个方向 -----
+    // ----- first bind: both directions -----
 
     @Test
     fun `binding uploads the whole project when the cloud folder is new and the project has files`() = runBlockingTest {
@@ -83,7 +83,7 @@ class ProjectSyncEngineTest {
         val ws = workspace()
         val drive = FakeDrive()
 
-        // 根目录没有 parent：整盘镜像会把删除传播放大到不可控范围，必须挡住
+        // the drive root has no parent: mirroring the whole drive would blow delete propagation up beyond control, so it must be blocked
         val result = engine(ws).bind(drive, projectId, "ROOT", "")
 
         assertTrue(result.isFailure)
@@ -100,13 +100,13 @@ class ProjectSyncEngineTest {
         val result = engine(ws).bind(drive, projectId, folder.id, "项目A")
 
         assertTrue(result.isFailure)
-        // 拒绝必须是"什么都没发生"：既不下载也不上传，两边原样保留
+        // a refusal must mean "nothing happened": neither download nor upload, both sides left exactly as they were
         assertFalse(File(ws.projectDir(projectId), "cloud.txt").exists())
         assertEquals("theirs", drive.contentOf("项目A/cloud.txt"))
         assertEquals("mine", ws.read(projectId, "local.txt").content)
     }
 
-    // ----- 大文件护栏（整文件过内存，不设上限会 OOM）-----
+    // ----- oversized-file guardrail (whole files pass through memory, so without a cap comes OOM) -----
 
     @Test
     fun `an oversized cloud file is skipped instead of being pulled into memory`() = runBlockingTest {
@@ -141,7 +141,7 @@ class ProjectSyncEngineTest {
         assertTrue(report.warnings.any { it.contains("跳过 1 个") })
     }
 
-    // ----- 懒惰推送 -----
+    // ----- lazy push -----
 
     @Test
     fun `pushOnly makes no remote call when nothing changed locally`() = runBlockingTest {
@@ -157,7 +157,7 @@ class ProjectSyncEngineTest {
 
         assertEquals(0, report.uploaded)
         assertEquals(uploadsBefore, drive.uploads)
-        // 只推不拉：pushOnly 一次 delta 都不该打
+        // push only, never pull: pushOnly must not fire a single delta call
         assertEquals(deltasBefore, drive.deltaCalls.size)
     }
 
@@ -179,7 +179,7 @@ class ProjectSyncEngineTest {
         assertEquals("v2-changed", drive.contentOf("项目A/a.txt"))
     }
 
-    // ----- 删除的两个方向 -----
+    // ----- the two directions of deletion -----
 
     @Test
     fun `sync removes a local file that was deleted in the cloud`() = runBlockingTest {
@@ -225,17 +225,17 @@ class ProjectSyncEngineTest {
         val engine = engine(ws)
         val binding = engine.createFolderAndBind(drive, projectId, "ROOT", "项目A", "项目A").getOrThrow().binding
 
-        // 模拟沙箱被清空（重装 / 清数据）：本地一个文件都不剩，但清单还记得云端有什么
+        // simulate the sandbox being wiped (reinstall / cleared data): not one local file is left, yet the manifest still remembers what the cloud holds
         ws.delete(projectId, "keep.txt")
         val report = engine.sync(drive, projectId, binding).getOrThrow()
 
         assertEquals(0, report.deletedRemote)
         assertTrue(report.warnings.isNotEmpty())
-        // 云端必须原样保留 —— 照清单删云端等于抹掉用户云盘
+        // the cloud must be kept as-is -- deleting it from the manifest wipes the user's drive
         assertEquals("important", drive.contentOf("项目A/keep.txt"))
     }
 
-    // ----- 冲突与游标 -----
+    // ----- conflicts and cursors -----
 
     @Test
     fun `a two-sided change keeps the local version and reports the conflict`() = runBlockingTest {
@@ -284,15 +284,15 @@ class ProjectSyncEngineTest {
         assertEquals("deep", drive.contentOf("项目A/deep/nested/file.txt"))
     }
 
-    /** 测试里不需要真正的延时调度，直接顺序执行。 */
+    /** No real delayed dispatch is needed in tests; just run things in order. */
     private fun runBlockingTest(block: suspend () -> Unit) = kotlinx.coroutines.runBlocking { block() }
 
-    // ----- 内存 fake 云端 -----
+    // ----- in-memory fake cloud -----
 
     /**
-     * 内存 OneDrive：用单调递增的 [revision] 模拟 Graph 的增量语义 —— `deltaLink`
-     * 编码"已经看到第几版"，之后的改动靠 `revision > since` 筛出来。删除项带
-     * `deleted = true` 返回（与 Graph 一致：删除的 driveItem 只有 id 可靠）。
+     * In-memory OneDrive: a monotonically increasing [revision] models Graph's incremental semantics -- `deltaLink`
+     * encodes "which version has been seen so far", and later changes are filtered out by `revision > since`. Deleted items come
+     * back carrying `deleted = true` (matching Graph: for a deleted driveItem only the id is reliable).
      */
     private class FakeDrive : RemoteDrive {
 

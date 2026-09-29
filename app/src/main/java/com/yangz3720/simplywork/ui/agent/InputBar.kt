@@ -38,8 +38,8 @@ import com.yangz3720.simplywork.core.session.TodoItem
 import com.yangz3720.simplywork.core.session.TodoStatus
 
 /**
- * 底部输入区：运行状态条 / 失败重试条（Q2）/ 编辑历史提问条 → 待办入口 → 输入框。
- * 运行中输入即 Steering（design §6 节点 B：转向在下一步循环生效）。
+ * Bottom input area: run status row / failure retry row (Q2) / edit-history-prompt row -> todo entry -> input field.
+ * Typing while running is Steering (design §6 node B: a steer takes effect on the next loop step).
  */
 @Composable
 fun InputBar(
@@ -62,7 +62,7 @@ fun InputBar(
         modifier = modifier
             .fillMaxWidth()
             .navigationBarsPadding()
-            // 异形屏（大 R 角）额外余量：输入条抬离手势区，视觉不贴边。
+            // Extra margin for cutout screens (large corner radius): the input bar lifts off the gesture area so it does not visually hug the edge.
             .padding(bottom = 6.dp)
             .imePadding()
             .background(MaterialTheme.colorScheme.background)
@@ -140,7 +140,7 @@ fun InputBar(
     }
 }
 
-/** 运行状态条：步骤指示 + 停止。 */
+/** Run status row: step indicator + stop. */
 @Composable
 private fun RunStatusRow(iteration: Int, onStop: () -> Unit) {
     Row(
@@ -174,7 +174,7 @@ private fun RunStatusRow(iteration: Int, onStop: () -> Unit) {
     }
 }
 
-/** 失败横幅：显式错误 + 重试（Q2 循环外层重启）。 */
+/** Failure banner: an explicit error + retry (Q2 outer-loop restart). */
 @Composable
 private fun ErrorBanner(text: String, onRetry: () -> Unit) {    Surface(color = MaterialTheme.colorScheme.error.copy(alpha = 0.07f)) {
         Row(
@@ -198,7 +198,7 @@ private fun ErrorBanner(text: String, onRetry: () -> Unit) {    Surface(color = 
     }
 }
 
-/** 编辑历史提问横幅：显式声明分支语义（发送后旧对话保留为新分支旁支）。 */
+/** Edit-history-prompt banner: it explicitly declares the branch semantics (after sending, the old conversation is kept as a sibling of the new branch). */
 @Composable
 private fun EditBanner(onCancel: () -> Unit) {
     Surface(color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)) {
@@ -230,9 +230,9 @@ private fun EditBanner(onCancel: () -> Unit) {
     }
 }
 
-// ----- 空态 -----
+// ----- Empty state -----
 /**
- * 空态：欢迎语 + 示例（不做接入提示——配置入口在顶栏设置齿轮）。
+ * Empty state: welcome line + examples (no onboarding hint -- the configuration entry point is the settings gear in the top bar).
  */
 @Composable
 fun EmptyState(
@@ -275,7 +275,7 @@ private fun SuggestionRow(text: String, onSelect: (String) -> Unit) {
     }
 }
 
-// ----- Q1：HITL 审批弹窗 -----
+// ----- Q1: HITL approval dialog -----
 
 @Composable
 fun ApprovalDialog(
@@ -330,7 +330,7 @@ fun ApprovalDialog(
     )
 }
 
-// ----- 待办面板（State Memory 投影） -----
+// ----- Todo panel (the projection of State Memory) -----
 
 @Composable
 fun TodoSheet(todos: List<TodoItem>, modifier: Modifier = Modifier) {

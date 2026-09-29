@@ -49,44 +49,44 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/** 网盘根在 Graph 里的固定 item id；根层只用于浏览，不可挂接。 */
+/** The fixed Graph item id of the cloud-drive root; the root level is browse-only and cannot be bound. */
 private const val ROOT_ID = "root"
 
 /**
- * 面板高度上限（内容少时面板按内容收紧，这只是一个上限）。
+ * Panel height cap (with little content the panel tightens to its content; this is only an upper bound).
  */
 private val PANEL_MAX_HEIGHT = 640.dp
 
 /**
- * 单个文件夹行的**固定**行高。它是 [LIST_MAX_HEIGHT] 的计量单位：行高被写死，列表
- * 上限取整数倍，两者共用一个真值源，列表才永远不会切在行中间（要么整行显示、
- * 要么整行滚走）。顺带保证点击区域不小于 44dp 的触控最小尺寸。
+ * The **fixed** row height of one folder row. It is the unit of measure for [LIST_MAX_HEIGHT]: the row height is
+ * hard-coded, the list cap is an integer multiple of it, and the two share a single source of truth, so the list never
+ * cuts through the middle of a row (whole rows show or whole rows scroll away). Incidentally it also keeps the tap target at the 44dp touch minimum.
  */
 private val FOLDER_ROW_HEIGHT = 44.dp
 
-/** 文件夹列表最多显示 6 整行，多出来的自己滚。 */
+/** The folder list shows at most 6 whole rows; anything beyond that scrolls itself. */
 private val LIST_MAX_HEIGHT = FOLDER_ROW_HEIGHT * 6
 
 /**
- * 项目 ↔ 云端文件夹的挂接面板（v1.4）。一个弹层走完全部流程：登录 → 挑文件夹 →
- * 自动对齐 → 看状态 → 同步 / 取消关联。
+ * The project <-> cloud-folder binding panel (v1.4). One dialog layer carries the whole flow: sign in -> pick a folder ->
+ * auto-align -> see status -> sync / unlink.
  *
- * v1.1：从底部面板（`ModalBottomSheet`）改成**大弹窗**。原因是底部面板把手势当成了
- * 控制方式 —— 挑文件夹时手往下滑本想翻列表，却直接把整个面板滑走了，人得从头再来一遍。
- * 弹窗不接管下拉手势，列表怎么滚都不会把面板弄没；面板也更高，一屏能看 6 行而不是 4 行。
- * 代价是失去了"下滑关闭"，所以补上一个显式的「关闭」按钮和系统返回键。
+ * v1.1: switched from a bottom sheet (`ModalBottomSheet`) to a **large dialog**. The reason was that the bottom sheet treated
+ * gestures as its control mechanism -- while picking a folder, a downward swipe meant to scroll the list instead slid the whole sheet away and you had to start over.
+ * A dialog does not take over the drag gesture, so no amount of list scrolling can lose the panel; the panel is also taller, showing 6 rows on a screen instead of 4.
+ * The cost is that "swipe down to close" is gone, so an explicit "Close" button and the system back key were added to compensate.
  *
- * 挑选仍然是**浏览式**的：点一行进下一层，目标层级由底部的「选择此文件夹」确认。没有
- * 每行的双按钮，也不用为了挑一个已存在的文件夹打字。新建文件夹退成一个小入口 ——
- * 它是唯一躲不掉输入名字的动作。
+ * Picking is still **browse-style**: tap a row to descend a level, and the target level is confirmed by "Select this folder" at the bottom. There are no
+ * per-row twin buttons, and no typing just to pick a folder that already exists. New folder is demoted to a small entry point --
+ * it is the one action that cannot avoid typing a name.
  *
- * 滚动结构是刻意的：**只有文件夹列表滚，外层不滚**。外层一旦可滚动，长列表会把
- * 底部按钮推出屏幕；而外层滚 + 列表也滚是同向嵌套滚动，会直接崩。列表高度上限取
- * 整数行高（[LIST_MAX_HEIGHT]），所以它要么整行显示、要么整行滚走，永远不切在行
- * 中间；底部确认按钮因此永远可见，配 [imePadding] 后键盘弹起也一样。
+ * The scroll structure is deliberate: **only the folder list scrolls, the outer layer does not**. Once the outer layer can scroll, a long list pushes the
+ * bottom buttons off screen; and outer scroll + list scroll is same-direction nested scrolling, which crashes outright. The list height cap is taken
+ * as an integer number of row heights ([LIST_MAX_HEIGHT]), so it either shows whole rows or scrolls whole rows away and never
+ * cuts through the middle of a row; the bottom confirm button is therefore always visible, and with [imePadding] that holds when the keyboard is up too.
  *
- * 网盘根不可选：整盘同步会把删除传播放大到不可控范围，所以底部的确认按钮在根层
- * 直接禁用并说明原因，而不是让人点下去再报错。
+ * The cloud-drive root is not selectable: syncing the whole drive would amplify delete propagation into an uncontrollable range, so the bottom confirm button is
+ * disabled outright at the root level with the reason stated, rather than letting someone tap it and then get an error.
  */
 @Composable
 fun OneDriveSheet(
@@ -101,15 +101,15 @@ fun OneDriveSheet(
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
     onBind: (CloudFolder) -> Unit,
-    /** 在**当前浏览层级**新建文件夹并挂接（parentId/parentPath 由弹层给出）。 */
+    /** Create a folder **at the current browse level** and bind it (parentId/parentPath are supplied by the dialog). */
     onCreateAndBind: (parentId: String, parentPath: String, name: String) -> Unit,
     onSyncNow: () -> Unit,
     onUnbind: () -> Unit,
     onDismissError: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    // 浏览层级栈由弹层自己持有：VM 只负责"给我某一层的子文件夹"。栈里存 CloudFolder
-    // 本身，底部确认时就不用再从子列表里反查当前层级（子列表里根本没有自己）。
+    // The browse-level stack is held by the dialog itself: the VM only answers "give me the subfolders of some level". The stack stores
+    // CloudFolder itself, so confirming at the bottom never has to look the current level back up from the sub-list (which does not contain itself anyway).
     var stack by remember { mutableStateOf(listOf(CloudFolder(ROOT_ID, "我的文件", ""))) }
     var draft by remember { mutableStateOf("") }
     var naming by remember { mutableStateOf(false) }
@@ -120,12 +120,12 @@ fun OneDriveSheet(
         if (account != null) onBrowse(current.id, current.path)
     }
 
-    // 弹窗不接管下拉手势，所以"返回"必须由我们兜住，否则只能靠点「关闭」。
+    // The dialog does not take over the drag gesture, so "back" has to be caught by us; otherwise the only way out is tapping "Close".
     BackHandler { onDismiss() }
 
     Dialog(
         onDismissRequest = onDismiss,
-        // 默认宽度的对话框装不下文件夹列表；放开宽度限制后自己用 0.94 的宽度留出边距。
+        // A dialog at the default width cannot fit the folder list; the width limit is lifted and we leave the margins ourselves with a 0.94 width.
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Box(
@@ -241,8 +241,8 @@ fun OneDriveSheet(
                                         Text("新建文件夹")
                                     }
                                 }
-                                // 根层不渲染这个按钮：一个永远点不动的灰色大块只是视觉噪音，
-                                // 上面的提示已经说清"要往下进一层"。
+                                // At the root level this button is not rendered: a large grey block that can never be tapped is pure visual noise, and
+                                // the hint above already says plainly "go one level deeper".
                                 if (!atRoot) {
                                     Spacer(Modifier.size(4.dp))
                                     Button(
@@ -252,7 +252,7 @@ fun OneDriveSheet(
                                 }
                             }
 
-                            // 有显式错误行时不再叠一行状态，否则同一句话会显示两遍。
+                            // With an explicit error row present, do not stack a status line on top; otherwise the same sentence shows twice.
                             if (error == null && syncState.showable(bound = binding != null)) {
                                 Spacer(Modifier.size(10.dp))
                                 StatusLine(syncState)
@@ -299,7 +299,7 @@ private fun AccountLine(username: String, onDisconnect: () -> Unit) {
     }
 }
 
-/** 已挂接：只需回答"同步到哪、上次什么时候、现在怎么样"。 */
+/** Already bound: it only needs to answer "syncing to where, when last, and how it looks now". */
 @Composable
 private fun BoundPanel(
     folderPath: String,
@@ -330,7 +330,7 @@ private fun BoundPanel(
     }
 }
 
-/** 当前浏览层级（路径 + 上一层）。 */
+/** The current browse level (path + go up one level). */
 @Composable
 private fun PathRow(path: String, canGoUp: Boolean, onGoUp: () -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -353,7 +353,7 @@ private fun PathRow(path: String, canGoUp: Boolean, onGoUp: () -> Unit) {
     }
 }
 
-/** 一行文件夹：整行可点 = 进下一层。 */
+/** One folder row: the whole row is tappable = descend one level. */
 @Composable
 private fun FolderRow(name: String, onClick: () -> Unit) {
     Row(
@@ -389,8 +389,8 @@ private fun Hint(text: String) {
 }
 
 /**
- * 挑选态只显示"进行中 / 出错"；「上传 2」这类结果只在已挂接的面板里显示 ——
- * 不然别的项目上次同步留下的「已是最新」会飘在一个还没挂接的面板底部，纯噪音。
+ * The picking state only shows "in progress / error"; results like "Uploaded 2" are only shown in an already-bound panel --
+ * otherwise an "up to date" left behind by another project's last sync would float at the bottom of a not-yet-bound panel, pure noise.
  */
 private fun SyncState.showable(bound: Boolean): Boolean = when (this) {
     is SyncState.Idle -> false
@@ -398,7 +398,7 @@ private fun SyncState.showable(bound: Boolean): Boolean = when (this) {
     is SyncState.Info -> bound
 }
 
-/** 一行状态：只在真的有事发生时出现，空闲时不占视觉。 */
+/** One status line: it appears only when something truly happens, and takes no visual space while idle. */
 @Composable
 private fun StatusLine(syncState: SyncState) {
     val text = when (syncState) {

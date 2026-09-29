@@ -8,14 +8,15 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * MSAL **Android** 的回调地址格式（v1.4）。这层必须有测试，因为它错了只在真机登录时
- * 才暴露、且报的是服务器侧的 `AADSTS50011`，看起来完全不像本地 bug。
+ * MSAL **Android**'s redirect URI format (v1.4). This layer has to be tested, because getting it
+ * wrong only shows up on an on-device sign-in, and what it reports is a server-side `AADSTS50011`
+ * that looks nothing like a local bug.
  *
- * 具体踩过的坑：本项目最初写成 `msal<clientId>://auth`（MSAL.NET 的形式），
- * MSAL Android 用的是 `msauth://<包名>/<URL 编码的签名哈希>`。
+ * The pothole actually hit: this project originally wrote `msal<clientId>://auth` (the MSAL.NET
+ * form), whereas MSAL Android uses `msauth://<package name>/<URL-encoded signature hash>`.
  *
- * 断言刻意与**本机 keystore 无关**（哈希随机器变），只锁死"结构 + 编码"这两件
- * 会写错的事。
+ * The assertions are deliberately **independent of this machine's keystore** (the hash varies by
+ * machine) and lock down only the two things that get written wrong: structure + encoding.
  */
 class OneDriveMsalConfigTest {
 
@@ -35,19 +36,19 @@ class OneDriveMsalConfigTest {
         val uri = OneDriveMsalConfig.redirectUri()
         val encoded = uri.removePrefix("msauth://${BuildConfig.APPLICATION_ID}/")
 
-        // base64 里的 `/` `+` `=` 必须转义成 %2F %2B %3D，否则会被当成 URI 结构字符
-        // （hash 以 `/` 开头时会凭空多出一段路径）。
+        // the `/` `+` `=` of base64 must be escaped to %2F %2B %3D, else they are taken for URI structure characters
+        // (a hash starting with `/` would conjure an extra path segment out of nowhere).
         assertFalse("签名哈希必须 URL 编码，实际为 $encoded", encoded.contains('/'))
         assertFalse(encoded.contains('+'))
         assertFalse(encoded.contains('='))
 
-        // 解码回来必须与原哈希逐字符相同 —— 这条同时覆盖了"以 / 开头"的 keystore。
+        // decoding must give back the original hash character for character -- this also covers the keystore whose hash "starts with /".
         assertEquals(BuildConfig.MSAL_SIGNATURE_HASH, URLDecoder.decode(encoded, "UTF-8"))
     }
 
     @Test
     fun `placeholder client id is reported as not configured`() {
-        // 本仓库已填真实 client id；这条断言的是哨兵前缀的语义不被改坏。
+        // this repo already has a real client id filled in; the assertion pins the sentinel prefix's semantics so they cannot be broken.
         assertEquals(
             !BuildConfig.MSAL_CLIENT_ID.startsWith("REPLACE"),
             OneDriveMsalConfig.isConfigured()
@@ -56,7 +57,7 @@ class OneDriveMsalConfigTest {
 
     @Test
     fun `scopes never include the reserved identity scopes`() {
-        // openid/profile/offline_access 由 MSAL 自行补齐，显式传入会与它冲突。
+        // openid/profile/offline_access are filled in by MSAL itself; passing them explicitly conflicts with it.
         assertEquals(listOf("User.Read", "Files.ReadWrite"), OneDriveMsalConfig.SCOPES)
     }
 }

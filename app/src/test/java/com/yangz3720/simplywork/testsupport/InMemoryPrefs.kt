@@ -3,8 +3,8 @@ package com.yangz3720.simplywork.testsupport
 import android.content.SharedPreferences
 
 /**
- * JVM 单测用的 [SharedPreferences] 内存桩：只为纯键值语义的存储壳（ProjectStore 等）
- * 提供行为。所有非 String 操作是显式 no-op/默认值 —— 出现即测试桩越界。
+ * In-memory [SharedPreferences] stub for JVM unit tests: it provides behaviour only for pure key-value
+ * storage shells (ProjectStore and friends). Every non-String operation is an explicit no-op/default -- appearing at all means the stub has been overstepped.
  */
 class InMemoryPrefs : SharedPreferences {
     private val map = HashMap<String, String>()

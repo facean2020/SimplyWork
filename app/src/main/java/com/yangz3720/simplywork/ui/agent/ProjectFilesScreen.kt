@@ -31,19 +31,19 @@ import com.yangz3720.simplywork.core.workspace.AgentWorkspace
 import java.util.Locale
 
 /**
- * 全屏列表行高。与 OneDriveSheet 同一条纪律（固定行高 + 整行可点）：触控区域不小于 48dp。
+ * Full-screen list row height. Same discipline as OneDriveSheet (fixed row height + the whole row tappable): the touch target is never smaller than 48dp.
  */
 private val ENTRY_ROW_HEIGHT = 48.dp
 
 /**
- * 「项目」文件管理器（v1.5）：**只读**浏览当前项目的沙箱目录。
+ * The "project" file manager (v1.5): **read-only** browsing of the current project's sandbox directory.
  *
- * 只读是刻意的：改动工作区文件的唯一入口是 agent 的 fs_* 工具，所以"文件内容"和"改动
- * 记录"天然同源 —— 这里不会出现一处 App 改的、一处 agent 改的，两份互相矛盾的真相。
- * 点文件进预览（Markdown 渲染见 [FilePreviewSheet]），不做重命名/删除/编辑。
+ * Read-only is deliberate: the only entry point that changes workspace files is the agent's fs_* tools, so "file contents" and the "change
+ * log" are naturally from one source -- this screen will never show one part changed by the App and another by the agent, two contradictory truths.
+ * Tapping a file opens the preview (Markdown rendering in [FilePreviewSheet]); no rename/delete/edit.
  *
- * 滚动结构沿用 OneDriveSheet 的教训：**只有列表滚**（[LazyColumn] 独占剩余高度），
- * 外层不套 verticalScroll —— 同向嵌套滚动会崩。
+ * The scroll structure follows the lesson learned from OneDriveSheet: **only the list scrolls** ([LazyColumn] owns the remaining height),
+ * with no outer verticalScroll -- nested scrolling in the same direction crashes.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -106,7 +106,7 @@ fun ProjectFilesScreen(
     }
 }
 
-/** 当前层路径 + 上一层（根目录时不给返回键：一个点不动的按钮只是噪音）。 */
+/** Current-level path + go up one level (no back button at the root: a button that cannot move is just noise). */
 @Composable
 private fun PathRow(path: String, onUp: () -> Unit) {
     Row(
@@ -137,7 +137,7 @@ private fun PathRow(path: String, onUp: () -> Unit) {
     }
 }
 
-/** 一行条目：目录可点进下一层，文件可点开预览，右侧是大小（目录没有"大小"这回事）。 */
+/** One entry row: directories are tappable into the next level, files open a preview, and the size sits on the right (there is no such thing as a directory's "size"). */
 @Composable
 private fun EntryRow(entry: AgentWorkspace.Entry, onOpen: () -> Unit) {
     Row(
@@ -198,7 +198,7 @@ private fun ErrorRow(message: String, onDismiss: () -> Unit) {
     }
 }
 
-/** 文件大小：目录不显示大小，所以这里只在文件行用得上。 */
+/** File size: directories show no size, so this is only ever used on file rows. */
 internal fun formatFileSize(bytes: Long): String = when {
     bytes < 1024 -> "$bytes B"
     bytes < 1024 * 1024 -> "${bytes / 1024} KB"

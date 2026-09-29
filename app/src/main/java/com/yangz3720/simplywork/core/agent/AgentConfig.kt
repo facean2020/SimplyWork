@@ -19,10 +19,12 @@ data class AgentConfig(
     /** Post-tool gate truncation budget (§8.4). */
     val maxToolResultChars: Int = 8_000,
     /**
-     * 自动批准（v1.1）：USER_CONFIRMING 的工具默认每次都弹窗问人；开启后只有**不可逆**的
-     * 调用（`RegisteredTool.destructive`，目前只有 fs_delete）才拦下来。
+     * Auto-approval (v1.1): USER_CONFIRMING tools pop a dialog asking the human every time by
+     * default; once enabled, only **irreversible** calls (`RegisteredTool.destructive`,
+     * currently just fs_delete) are stopped.
      *
-     * 默认 false（最保守，且与旧行为一致）；产品层默认开启，由 `KeyringState` 决定。
+     * Default false (most conservative, and identical to the old behaviour); the product layer
+     * enables it by default, decided by `KeyringState`.
      */
     val autoApproveNonDestructive: Boolean = false,
     /** Base system prompt injected once per session and used in every request. */
@@ -57,6 +59,14 @@ data class AgentConfig(
               settings (e.g. Location switched off) — a permission request will not help.
             - Track multi-step work with the todo_write tool; keep it accurate so the
               completion guard can verify closure.
+            - Waiting: when what you are waiting for happens OUTSIDE this app (another app
+              writing a file, a network condition settling), use wait(seconds) to pause instead
+              of re-reading state in a tight loop. Max 300s per call; longer asks are capped.
+            - Scripts: js_run starts a JavaScript snippet in an isolated sandbox and returns a
+              jobId immediately; js_await waits for it (with a max wait of your choosing). The
+              sandbox is pure computation — no file, network or device access — so use the fs_*
+              tools to touch the workspace, never a script. A finished script also wakes you
+              with a js_job_finished message, so you can end your turn instead of waiting.
             - Self-operations: conversations are organized into projects. Each project owns
               its own sandbox workspace (fs_list/fs_read/fs_write/fs_mkdir operate inside the
               CURRENT project by default; fs_move/fs_delete need user confirmation). Read past

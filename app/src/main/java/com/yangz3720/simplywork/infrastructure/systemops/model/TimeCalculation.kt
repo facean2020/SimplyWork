@@ -83,7 +83,7 @@ object TimeCalculation {
             zdt = zdt.plus(spec.amount.toLong(), spec.unit.chronoUnit())
         }
         // Strictly forward: `next(FRIDAY)` never returns the current day, which is what
-        // "下周五" means. "This Friday" is expressible as amount/unit alone.
+        // "next Friday" means. "This Friday" is expressible as amount/unit alone.
         spec.weekday?.let { target ->
             zdt = zdt.with(TemporalAdjusters.next(target.dayOfWeek()))
         }

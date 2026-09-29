@@ -11,7 +11,7 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 
 /**
- * 改动记录的持久化：按会话隔离、跨实例可读、损坏文件不炸、会话 id 不能当路径使。
+ * Persistence of the change log: isolated per session, readable across instances, corrupt files do not blow up, and a session id cannot be used as a path.
  */
 class JsonFileChangeLogTest {
 

@@ -100,7 +100,7 @@ enum class TimeUnit { SECOND, MINUTE, HOUR, DAY, WEEK, MONTH, YEAR }
 enum class Weekday { MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY, SATURDAY, SUNDAY }
 
 /**
- * Resolve a relative date/time ("下周五下午3点") against the device clock.
+ * Resolve a relative date/time ("next Friday at 3pm") against the device clock.
  *
  * Order of operations is fixed and documented on the tool: shift by [amount]/[unit] →
  * advance strictly past the current day to [weekday] → overwrite the clock with [timeOfDay].

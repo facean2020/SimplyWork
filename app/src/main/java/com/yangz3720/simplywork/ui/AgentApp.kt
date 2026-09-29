@@ -17,22 +17,22 @@ import com.yangz3720.simplywork.ui.agent.ProjectFilesScreen
 import com.yangz3720.simplywork.ui.settings.SettingsScreen
 
 /**
- * App 根装配：对话主屏、项目文件屏（v1.5）与设置屏之间切换（三屏即可，无需导航库——零新增依赖）。
+ * App composition root: switches between the conversation main screen, the project files screen (v1.5) and the settings screen (three screens are enough, no navigation library needed -- zero new dependencies).
  *
- * 运行时权限申请（v1.2 / P4）挂在根层而不是 [AgentScreen]：`when(screen)` 整体替换
- * 两个页面，挂载在页面内的 launcher 会在切到设置页时被销毁，挂起中的授权请求就
- * 只能等到执行器超时。挂在这里，pending 弹窗在整个 App 生命周期内稳定存活。
+ * The runtime permission request (v1.2 / P4) is hosted at the root layer rather than in [AgentScreen]: `when(screen)` replaces
+ * both pages wholesale, so a launcher attached inside a page is destroyed when we switch to the settings page, and a suspended permission request can then
+ * only wait for the executor to time out. Hosted here, the pending dialog stays alive for the whole App lifecycle.
  *
- * 文件预览（v1.5）同样挂在根层：它有两个入口（会话底部的新增文件卡片、文件管理器），
- * 挂根层才能让"从哪进来"不影响页面本身。
+ * File preview (v1.5) is likewise hosted at the root layer: it has two entry points (the new-files card at the bottom of the conversation, the file manager),
+ * and only at the root layer does "which way you came in" leave the page itself unaffected.
  */
 @Composable
 fun AgentApp(viewModel: AgentViewModel) {
     var screen by remember { mutableStateOf<AppScreen>(AppScreen.Agent) }
     val state by viewModel.uiState.collectAsState()
 
-    // 基础设施只报告缺哪些权限；弹窗时机与形态归 UI（P4）。结果回灌后执行器会
-    // 复查权限再决定是否放行，所以"用户点了允许"不等于授权成功。
+    // Infrastructure only reports which permissions are missing; when and how the dialog appears belongs to the UI (P4). After the result is fed back the executor
+    // re-checks the permission before deciding whether to let it through, so "the user tapped allow" does not mean the grant succeeded.
     val permission by viewModel.permission.collectAsState()
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -103,7 +103,7 @@ private fun SettingsScreenRoute(viewModel: AgentViewModel, onBack: () -> Unit) {
 sealed interface AppScreen {
     data object Agent : AppScreen
 
-    /** 项目文件管理器（v1.5）：只读浏览当前项目的沙箱目录。 */
+    /** Project file manager (v1.5): read-only browsing of the current project's sandbox directory. */
     data object Files : AppScreen
     data object Settings : AppScreen
 }

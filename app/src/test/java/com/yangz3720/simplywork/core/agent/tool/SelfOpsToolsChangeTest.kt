@@ -22,8 +22,8 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 
 /**
- * fs_* 工具的改动记录（v1.5）：卡片上报的必须是**真实差异**——行数与差异行都来自写入
- * 前后的两次真实内容，而不是"新内容有多少行"。失败的操作不留记录。
+ * The change log of the fs_* tools (v1.5): what the card reports must be the **real diff** -- both the
+ * line counts and the diff lines come from the two real contents before and after the write, not from "how many lines the new content has". A failed operation leaves no record.
  */
 class SelfOpsToolsChangeTest {
 
@@ -33,7 +33,7 @@ class SelfOpsToolsChangeTest {
     private val workspace by lazy { AgentWorkspace(tmp.root) }
     private val changes = InMemoryFileChangeLog()
     private val projects = ProjectStore(InMemoryPrefs())
-    // lazy：TemporaryFolder 的目录在 before() 里才创建，字段初始化期取 root 会抛。
+    // lazy: TemporaryFolder's directory is only created in before(), so touching root during field initialisation would throw.
     private val tools by lazy {
         SelfOpsTools.registeredTools(
             repository = SessionRepositoryImpl(InMemorySessionStore(), InMemoryPayloadStore()),

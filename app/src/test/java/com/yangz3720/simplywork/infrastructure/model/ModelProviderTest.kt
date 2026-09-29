@@ -298,7 +298,7 @@ class ModelProviderTest {
         val result = client.listModels()
 
         assertTrue(result.isSuccess)
-        // 非字符串 id 与缺失 id 的条目被跳过；结果按字典序排序。
+        // entries with a non-string id or a missing id are skipped; the result is sorted lexicographically.
         assertEquals(listOf("deepseek-chat", "deepseek-reasoner"), result.getOrThrow())
         assertEquals("https://api.example.com/v1/models", capturedUrl)
         assertEquals("Bearer sk-test", capturedAuth)
@@ -332,10 +332,10 @@ class ModelProviderTest {
         val catalog = client.listModelCatalog().getOrThrow().associate { it.id to it.contextTokens }
 
         assertEquals(128_000, catalog["openrouter-ish"])
-        assertEquals(32_000, catalog["vllm-ish"])            // 字符串形式的数字也认
-        assertEquals(200_000, catalog["openrouter-nested"])  // 嵌套在 top_provider 里
-        assertEquals(8_192, catalog["llamacpp-ish"])         // llama.cpp 的 meta.n_ctx_train
-        // 端点没说 / 值不是正经正数 → null（= 未知），绝不猜一个数出来
+        assertEquals(32_000, catalog["vllm-ish"])            // a number in string form is accepted too
+        assertEquals(200_000, catalog["openrouter-nested"])  // nested inside top_provider
+        assertEquals(8_192, catalog["llamacpp-ish"])         // llama.cpp's meta.n_ctx_train
+        // the endpoint says nothing / the value is not a proper positive number -> null (= unknown), never guess a number into existence
         assertNull(catalog["openai-ish"])
         assertNull(catalog["bad-value"])
         assertNull(catalog["zero-value"])
@@ -355,7 +355,7 @@ class ModelProviderTest {
             HttpClient(mockEngine) { install(ContentNegotiation) { json(json) } }
         )
 
-        // 只有 id 的旧接口必须与 catalog 路径给出同一个集合，且维持字典序
+        // the id-only legacy endpoint must yield the same set as the catalog path, still in lexicographic order
         assertEquals(listOf("a-model", "b-model"), client.listModels().getOrThrow())
     }
 

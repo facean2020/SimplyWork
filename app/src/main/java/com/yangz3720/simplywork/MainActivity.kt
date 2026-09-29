@@ -22,6 +22,7 @@ class MainActivity : ComponentActivity() {
                 override fun <T : ViewModel> create(modelClass: Class<T>): T =
                     AgentViewModel(
                         container,
+                        container.runSupervisor,
                         container.approvalCoordinator,
                         container.permissionCoordinator,
                         container.projectStore,

@@ -7,7 +7,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** [KeyringLogic] 纯函数变换测试（多服务商密钥 + 动态选择）。 */
+/** [KeyringLogic] pure-function transform tests (multi-provider keys + dynamic selection). */
 class KeyringLogicTest {
 
     // ----- migrateLegacy -----
@@ -117,5 +117,33 @@ class KeyringLogicTest {
         assertEquals(60_000L, KeyringLogic.withTimeout(KeyringState(), 60_000L).timeoutMs)
         assertEquals(1_000L, KeyringLogic.withTimeout(KeyringState(), 0).timeoutMs)
         assertTrue(KeyringLogic.withTimeout(KeyringState(), -5L).timeoutMs >= 1_000L)
+    }
+
+    // ----- withModelContexts / contextKey (v1.1: learn the context length the provider reports) -----
+
+    @Test
+    fun `learned model contexts are keyed by provider and model`() {
+        // provider is required: the same model name need not share the spec across endpoints
+        assertEquals("openrouter/gpt-6-luna", KeyringLogic.contextKey("openrouter", "gpt-6-luna"))
+    }
+
+    @Test
+    fun `withModelContexts merges instead of replacing`() {
+        val first = KeyringLogic.withModelContexts(KeyringState(), mapOf("openrouter/a" to 100))
+        val second = KeyringLogic.withModelContexts(first, mapOf("openrouter/b" to 200))
+
+        assertEquals(mapOf("openrouter/a" to 100, "openrouter/b" to 200), second.modelContextTokens)
+    }
+
+    @Test
+    fun `withModelContexts drops non-positive values and no-ops on an empty batch`() {
+        val state = KeyringState()
+
+        // official OpenAI/DeepSeek /models report no context -> what we learn is an empty map, and it must be returned as-is
+        assertTrue(KeyringLogic.withModelContexts(state, emptyMap()) === state)
+        assertTrue(KeyringLogic.withModelContexts(state, mapOf("x/y" to 0, "x/z" to -1)) === state)
+
+        val mixed = KeyringLogic.withModelContexts(state, mapOf("x/ok" to 128_000, "x/bad" to 0))
+        assertEquals(mapOf("x/ok" to 128_000), mixed.modelContextTokens)
     }
 }

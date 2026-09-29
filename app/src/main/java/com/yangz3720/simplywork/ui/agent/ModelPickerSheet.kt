@@ -41,10 +41,10 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 
 /**
- * 顶栏模型选择弹层（VSCode Copilot 式，聚焦）：单一搜索框（无占位文字）+ 一条垂直列表，
- * 汇总所有「已配置密钥」服务商的模型（GET /models 并发拉取合并），每行右侧标注服务商名，
- * 选中项打勾。搜索词未命中任何模型时合并「手动输入模型名」为兜底行。不再放服务商 chips /
- * 管理密钥入口——服务商在此随模型一并选定，密钥管理回到设置页。
+ * Top-bar model picker sheet (VSCode Copilot style, focused): a single search field (no placeholder text) + one vertical list
+ * that aggregates the models of every provider with a "configured API key" (fetched concurrently via GET /models and merged), with the provider name annotated on the right of each row
+ * and the selected entry ticked. When the search term matches no model at all, "type the model name manually" is merged in as a fallback row. No more provider chips /
+ * API key management entry points -- the provider is chosen along with the model here, and API key management goes back to the settings page.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -63,7 +63,7 @@ fun ModelPickerSheet(
     var search by remember { mutableStateOf("") }
     var reloadKey by remember { mutableStateOf(0) }
 
-    // 并发拉取各服务商模型列表并合并；单个失败静默忽略（保持聚焦），全部为空才显式报错。
+    // Fetch every provider's model list concurrently and merge them; a single failure is silently ignored (stay focused), and only "everything empty" raises an explicit error.
     LaunchedEffect(reloadKey, configured.size) {
         if (configured.isEmpty()) {
             loading = false
@@ -173,7 +173,7 @@ fun ModelPickerSheet(
                         }
                     }
 
-                    // 手动输入兜底（合并原独立输入框）：搜索词未命中时，作为自定义模型名使用。
+                    // Manual-entry fallback (absorbing what used to be a separate input box): when the search term matches nothing, use it as a custom model name.
                     if (canManual) {
                         val target = activeProviderId ?: configured.firstOrNull()?.id
                         item {

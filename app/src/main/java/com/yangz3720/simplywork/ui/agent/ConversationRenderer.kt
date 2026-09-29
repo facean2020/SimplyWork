@@ -10,15 +10,15 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 /**
- * 会话 DAG 活跃路径 → [UiMessage] 列表的纯函数投影（可 JVM 测试）。
+ * A pure-function projection of the session DAG's active path -> a list of [UiMessage] (JVM-testable).
  *
- * 映射规则（简约原则）：
- * - SystemPrompt(base) 不渲染（内部注入）；follow_up 渲染为 FollowUp 条目；
- * - ToolCall 节点拆为 Assistant 正文 + N 条 ToolActivity；
- * - ToolResult 就近归并到同 toolCallId 的 ToolActivity（孤儿结果独立成条）；
- * - UserPrompt 附分支信息：[allNodes] 中同 parent 的 UserPrompt 兄弟数（编辑重发
- *   产生的多分支，VSCode-Copilot 式）；
- * - v1.5：fs_* 的 [changes] 按 toolCallId 贴回对应工具条目（Codex 式 diff 卡片）。
+ * Mapping rules (principle of parsimony):
+ * - SystemPrompt(base) is not rendered (injected internally); follow_up renders as a FollowUp entry;
+ * - a ToolCall node is split into Assistant body text + N ToolActivity entries;
+ * - ToolResult is merged nearby into the ToolActivity with the same toolCallId (orphan results become their own entry);
+ * - UserPrompt carries branch info: the number of UserPrompt siblings sharing the same parent in [allNodes] (the multiple branches
+ *   produced by edit-and-resend, VSCode-Copilot style);
+ * - v1.5: fs_* [changes] are pasted back onto the matching tool entry by toolCallId (a Codex-style diff card).
  */
 object ConversationRenderer {
 
@@ -58,7 +58,7 @@ object ConversationRenderer {
                     if (kind == "follow_up" && text.isNotBlank()) {
                         messages.add(UiMessage(node.id, UiMessageKind.FollowUp, text, node.createdAt))
                     }
-                    // kind=base：内部注入，不渲染
+                    // kind=base: injected internally, not rendered
                 }
 
                 SessionNodeType.ToolCall -> {
@@ -125,8 +125,8 @@ object ConversationRenderer {
     }
 
     /**
-     * 把改动贴到对应工具条目上（v1.5）。按 toolCallId 精确匹配，一次工具调用最多一笔改动；
-     * 匹配不上的改动**不渲染** —— 贴错位置比不贴更糟（读的人会以为改的是另一个文件）。
+     * Paste changes onto the matching tool entry (v1.5). Matched exactly by toolCallId, so a single tool call carries at most one change;
+     * changes that do not match are **not rendered** -- attaching them in the wrong place is worse than not attaching them (the reader would think a different file was changed).
      */
     private fun attachFileChanges(
         messages: List<UiMessage>,

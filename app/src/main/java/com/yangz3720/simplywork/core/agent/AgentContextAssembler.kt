@@ -80,8 +80,8 @@ class AgentContextAssembler(
                 val user = NodePayloads.decodeMessage(payload) as? Message.User
                     ?: return null
                 // Per-turn time anchor (v1.2): exactly one human-readable line per user turn —
-                // not per node. A wall-clock stamp is what the model can reason with ("昨天",
-                // "本周五"); raw epoch ms is not. Zone rules resolve DST into the printed
+                // not per node. A wall-clock stamp is what the model can reason with ("yesterday",
+                // "this Friday"); raw epoch ms is not. Zone rules resolve DST into the printed
                 // offset, so no local DST knowledge is needed anywhere in the pipeline.
                 Message.User(content = "[message time: ${turnTime(node.createdAt)}]\n${user.content}")
             }

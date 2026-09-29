@@ -7,21 +7,21 @@ import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 
 /**
- * 改动记录的读写缝（v1.5）。写侧是 fs_* 工具（agent 改文件时落一笔），读侧是会话投影
- * （把改动贴回对话流）——两侧同源，所以"看到什么"必然等于"改了什么"。
+ * Read/write seam of the change log (v1.5). The write side is the fs_* tools (they record an entry when the agent changes a file), the read side is the session
+ * projection (which sticks the change back into the conversation flow) -- both sides share one source, so "what you see" necessarily equals "what was changed".
  */
 interface FileChangeLog {
 
     suspend fun record(change: FileChange)
 
-    /** 某会话的改动，按时间升序（旧 → 新）。没有记录返回空表。 */
+    /** Changes of one session, ascending by time (old → new). Returns an empty list when there is no record. */
     suspend fun changes(sessionId: String): List<FileChange>
 
-    /** 删除某会话的全部改动记录（会话被删时）。没有记录是 no-op。 */
+    /** Deletes all change records of a session (when the session is deleted). No record is a no-op. */
     suspend fun delete(sessionId: String)
 }
 
-/** JVM 测试用实现（无文件系统依赖）。 */
+/** JVM-test implementation (no filesystem dependency). */
 class InMemoryFileChangeLog : FileChangeLog {
 
     private val bySession = LinkedHashMap<String, MutableList<FileChange>>()
@@ -39,11 +39,11 @@ class InMemoryFileChangeLog : FileChangeLog {
 }
 
 /**
- * 每会话一个 JSON 文件：`<baseDir>/<sessionId>.json`，内容是 [FileChange] 数组。
+ * One JSON file per session: `<baseDir>/<sessionId>.json`, whose content is a [FileChange] array.
  *
- * 独立于会话 DAG 存储：改动的"客观内容"（差异行）不进模型上下文，也就不该塞进 payload
- * store（那是喂给 LLM 的原始记录）。上限 [maxPerSession] 防单会话无界增长——丢的只会是
- * 最旧的卡片，不影响任何真实文件。
+ * Separate from the session DAG store: the "objective content" of a change (the diff lines) does not enter the model context, so it should not be stuffed into the payload
+ * store (that is the raw record fed to the LLM). The [maxPerSession] cap stops unbounded growth per session -- all that is dropped is
+ * the oldest card, and no real file is affected.
  */
 class JsonFileChangeLog(
     private val baseDir: File,
@@ -53,7 +53,7 @@ class JsonFileChangeLog(
     private val json = Json { ignoreUnknownKeys = true }
     private val serializer = ListSerializer(FileChange.serializer())
 
-    /** 会话文件是"读-改-写"，必须串行（同一 run 内多个工具调用会并发落盘）。 */
+    /** Session files are read-modify-write and must be serialized (several tool calls in one run persist concurrently). */
     private val mutex = Mutex()
 
     override suspend fun record(change: FileChange) {
@@ -74,7 +74,7 @@ class JsonFileChangeLog(
     private fun read(sessionId: String): List<FileChange> {
         val file = fileFor(sessionId)
         if (!file.isFile) return emptyList()
-        // 损坏的记录等同没有：改动卡片是展示物，不值得为它中断会话投影（P2 反面）。
+        // A corrupt record counts as none: change cards are a display artifact, not worth breaking the session projection over (the reverse of P2).
         return runCatching { json.decodeFromString(serializer, file.readText()) }.getOrNull().orEmpty()
     }
 
@@ -84,7 +84,7 @@ class JsonFileChangeLog(
         file.writeText(json.encodeToString(serializer, changes))
     }
 
-    /** 会话 id 进文件名 → 必须挡住 `../` 之类的构造（这条路径由 App 自己产生，仍显式校验）。 */
+    /** The session id goes into the file name → `../`-style constructions must be blocked (this path is produced by the App itself, still validated explicitly). */
     private fun fileFor(sessionId: String): File {
         require(SESSION_ID_REGEX.matches(sessionId)) { "invalid session id for change log: '$sessionId'" }
         return File(baseDir, "$sessionId.json")

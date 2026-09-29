@@ -16,6 +16,6 @@ local.properties
 .mimocode
 .kotlin/
 
-# 发布签名密钥库：含私钥，绝不入库（口令在 local.properties，同样已忽略）。
-# 丢了它就无法再覆盖升级同一个 App —— 请另行备份。
+# Release signing keystore: contains a private key — never commit (password is in local.properties, also ignored).
+# Losing it means you can no longer upgrade the same app over-the-air — back it up separately.
 keystore/

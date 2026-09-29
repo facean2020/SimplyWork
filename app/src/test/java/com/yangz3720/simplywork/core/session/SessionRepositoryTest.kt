@@ -143,7 +143,7 @@ class SessionRepositoryTest {
         assertTrue(repository.getSession(record.id) != null)
     }
 
-    // ----- 分支（编辑重发，VSCode-Copilot 式） -----
+    // ----- branching (edit-and-resend, VSCode-Copilot style) -----
 
     @Test
     fun `appendUserPrompt creates sibling branch and advances leaf`() = runTest {
@@ -157,11 +157,11 @@ class SessionRepositoryTest {
 
         val edited = repository.appendUserPrompt(session.id, base.id, "编辑后的提问")
 
-        // 叶子推进到新分支；旧分支节点保留在库里
+        // the leaf advances onto the new branch; the old branch's nodes stay in the store
         assertEquals(edited.id, repository.getSession(session.id)!!.activeLeafId)
         assertTrue(repository.listNodes(session.id).any { it.id == original.id })
 
-        // 同 parent 的 UserPrompt 兄弟 = 原始 + 编辑（createdAt 升序）
+        // UserPrompt siblings under the same parent = original + edit (ascending createdAt)
         val siblings = repository.promptSiblings(session.id, original.id)
         assertEquals(listOf(original.id, edited.id), siblings.map { it.id })
     }
@@ -181,7 +181,7 @@ class SessionRepositoryTest {
 
         assertEquals(child2.id, repository.branchLeaf(session.id, original.id))
 
-        // 切回旧分支：活跃路径恢复整条旧链
+        // switching back to the old branch: the active path restores the whole old chain
         repository.updateActiveLeaf(session.id, repository.branchLeaf(session.id, original.id))
         assertEquals(
             listOf(original.id, child1.id, child2.id),
@@ -195,7 +195,7 @@ class SessionRepositoryTest {
         assertTrue(repository.promptSiblings(session.id, "ghost").isEmpty())
     }
 
-    // ----- 删除会话 -----
+    // ----- deleting a session -----
 
     @Test
     fun `deleteSession removes nodes, state and payload`() = runTest {
@@ -209,7 +209,7 @@ class SessionRepositoryTest {
         assertTrue(repository.listNodes(session.id).isEmpty())
         assertTrue(repository.activePath(session.id).isEmpty())
         assertTrue(repository.loadState(session.id).todos.isEmpty())
-        // payload 也必须没了：读它要显式失败，而不是悄悄返回旧内容
+        // the payload must be gone too: reading it has to fail explicitly, not quietly return the old content
         assertThrows(InfrastructureException.Session.PayloadMissing::class.java) { repository.payload(node) }
     }
 

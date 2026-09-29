@@ -20,32 +20,32 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
 
-/** 尚未在 `gradle.properties` 填 `msalClientId`。UI 据此给"未配置"提示而不是空白报错。 */
+/** `msalClientId` has not been filled in `gradle.properties` yet. The UI uses this to show a "not configured" hint instead of a blank error. */
 class OneDriveNotConfiguredException :
     IllegalStateException("未配置 OneDrive：请在 gradle.properties 填入 msalClientId（见 docs/PlaningStages/onedrive-setup.md）")
 
-/** 静默取令牌时发现本地没有已登录账号（MSAL `no_current_account`）。 */
+/** Silent token acquisition found no signed-in account locally (MSAL `no_current_account`). */
 class OneDriveNotSignedInException : IllegalStateException("尚未连接 OneDrive 账号")
 
-/** 用户在授权页取消（MSAL 走 onCancel 回调，不是异常码）。 */
+/** The user cancelled on the authorisation page (MSAL goes through the onCancel callback, not an error code). */
 class OneDriveSignInCancelled : RuntimeException("已取消 OneDrive 登录")
 
 /**
- * MSAL 单账号登录封装（v1.4）。只负责"登录 / 静默续期 / 登出 / 当前账号"，
- * 不碰 Graph（那是 [OneDriveGraphClient]），也不碰同步语义。
+ * MSAL single-account sign-in wrapper (v1.4). It only handles "sign in / silent renewal / sign out / current account",
+ * touching neither Graph (that is [OneDriveGraphClient]) nor sync semantics.
  *
- * 单账号（`account_mode: SINGLE`）是刻意的：产品语义是"这个 App 连一个个人 OneDrive"，
- * 多账号只会让"项目绑到谁的盘"变得含糊。
+ * Single account (`account_mode: SINGLE`) is deliberate: the product semantics are "this app connects to one personal OneDrive",
+ * and multiple accounts would only make "whose drive the project is bound to" ambiguous.
  *
- * 全部 MSAL 调用都离线主线程（`getCurrentAccount` / `acquireTokenSilent` / `create*`
- * 都是阻塞或重 IO 的），只有交互式 [signIn] 必须回主线程 —— MSAL 要从 Activity 拉起
- * 授权页。
+ * Every MSAL call stays off the main thread (`getCurrentAccount` / `acquireTokenSilent` / `create*`
+ * are blocking or heavy IO); only the interactive [signIn] must go back to the main thread — MSAL has to launch the
+ * authorisation page from an Activity.
  *
- * **静默取令牌只能用"不带回调"的那个重载。** `acquireTokenSilent(parameters)` 是同步版，
- * 其内部 `acquireTokenSilentInternal` 开头就是
- * `if (params.getCallback() != null) throw IllegalArgumentException("Do not provide callback for synchronous methods")`；
- * 要回调就得改用 `acquireTokenSilentAsync(parameters)`。两个重载互斥，传错必崩，
- * 而且崩在每一次取令牌上 —— 浏览、拉取、推送会全部失败。
+ * **Silent token acquisition may only use the overload without a callback.** `acquireTokenSilent(parameters)` is the synchronous variant,
+ * and its internal `acquireTokenSilentInternal` starts with
+ * `if (params.getCallback() != null) throw IllegalArgumentException("Do not provide callback for synchronous methods")`;
+ * passing a callback means switching to `acquireTokenSilentAsync(parameters)`. The two overloads are mutually exclusive, and passing the wrong one always crashes,
+ * and it crashes on every single token acquisition — browsing, pulling and pushing would all fail.
  */
 class OneDriveAuth(private val context: Context) {
 
@@ -60,8 +60,8 @@ class OneDriveAuth(private val context: Context) {
     fun isConfigured(): Boolean = OneDriveMsalConfig.isConfigured()
 
     /**
-     * 冷启动恢复：把 MSAL 缓存里的账号投影到 [account]。没有已登录账号时清空状态
-     * （而不是保留陈旧值，P2）。
+     * Cold-start restore: project the account from the MSAL cache into [account]. When there is no signed-in account, clear the state
+     * (rather than keeping a stale value, P2).
      */
     suspend fun restore(): OneDriveAccount? {
         if (!isConfigured()) {
@@ -75,7 +75,7 @@ class OneDriveAuth(private val context: Context) {
         return restored
     }
 
-    /** 交互式登录（必须在主线程：MSAL 要从 [activity] 拉起授权页）。 */
+    /** Interactive sign-in (must be on the main thread: MSAL has to launch the authorisation page from [activity]). */
     suspend fun signIn(activity: Activity): Result<OneDriveAccount> = withContext(Dispatchers.Main) {
         if (!isConfigured()) return@withContext Result.failure(OneDriveNotConfiguredException())
         val client = runCatching { application() }
@@ -107,15 +107,15 @@ class OneDriveAuth(private val context: Context) {
         }
     }
 
-    /** 登出：清 MSAL 缓存中的账号，但**不动**任何项目的绑定与本地文件。 */
+    /** Sign out: clear the account in the MSAL cache, but **leave untouched** every project binding and local file. */
     suspend fun signOut(): Result<Unit> = runCatching {
         withContext(Dispatchers.IO) { application().signOut() }
         _account.value = null
     }
 
     /**
-     * 取 access token 给 Graph 用。[forceRefresh] = true 时绕过缓存（401 后重试用）。
-     * 无账号 / 续期失败一律抛异常 —— 静默降级会让同步写出一半就断（P2）。
+     * Get an access token for Graph. [forceRefresh] = true bypasses the cache (used for the retry after a 401).
+     * No account / renewal failure always throws — a silent degradation would let a sync write half of it and then break (P2).
      */
     suspend fun accessToken(forceRefresh: Boolean = false): String = withContext(Dispatchers.IO) {
         val client = application()
@@ -124,14 +124,14 @@ class OneDriveAuth(private val context: Context) {
             AcquireTokenSilentParameters.Builder()
                 .withScopes(OneDriveMsalConfig.SCOPES)
                 .forAccount(current)
-                // forAccount 只设账号不设 authority，而 MSAL 校验要求 authority 非空。
+                // forAccount sets only the account and not the authority, while MSAL validation requires a non-null authority.
                 .fromAuthority(current.authority)
                 .forceRefresh(forceRefresh)
                 .build()
         ).accessToken
     }
 
-    /** 惰性建单账号应用：MSAL 的 create* 是阻塞调用，只在后台线程做一次。 */
+    /** Lazily create the single-account application: MSAL's create* is a blocking call, done once on a background thread only. */
     private suspend fun application(): ISingleAccountPublicClientApplication {
         app?.let { return it }
         return createLock.withLock {

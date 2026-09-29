@@ -36,21 +36,21 @@ import com.yangz3720.simplywork.core.workspace.FileChangeKind
 import com.yangz3720.simplywork.core.workspace.TextDiff
 
 /**
- * 底部「新增文件」小卡片的行高。与 OneDriveSheet 同一条纪律：行高写死、列表上限取整数倍，
- * 列表才要么整行显示、要么整行滚走（估出来的行高会切半行，那是真踩过的坑）。
+ * Row height of the small "new files" card at the bottom. Same discipline as OneDriveSheet: the row height is fixed
+ * and the list cap is an integer multiple of it, so the list shows whole rows or scrolls whole rows away (an estimated row height cuts rows in half -- a trap we really did hit).
  */
 private val FILE_ROW_HEIGHT = 40.dp
 
 /**
- * Codex 式改动卡片（v1.5）：贴在触发这次改动的工具条目下方。
+ * Codex-style change card (v1.5): attached below the tool entry that triggered this change.
  *
- * 折叠态只占一行，回答"改了哪个文件、动了多少行"；点开才铺差异行。摘要里的 `+N −M` 是
- * 真实算出来的行数 —— 算不出来（差异区过大、基线被截断）时**不显示数字**，而不是拿
- * 整篇新内容冒充新增行。
+ * Collapsed it is one line, answering "which file changed, how many lines moved"; only when opened does it lay out the
+ * diff lines. The `+N −M` in the summary is a really computed line count -- when it cannot be computed (diff region too
+ * large, baseline truncated) we **render no numbers**, rather than passing off the whole new content as added lines.
  */
 @Composable
 fun ToolChangeCard(change: FileChange) {
-    // 按 toolCallId 记住展开态：列表复用条目时不会把别的卡片的展开态串过来。
+    // Remember expansion state by toolCallId: when the list reuses entries, another card's expansion state does not leak in.
     var expanded by remember(change.toolCallId, change.path) { mutableStateOf(false) }
     val hasDiff = change.diff.isNotEmpty()
     val path = change.toPath?.let { "${change.path} → $it" } ?: change.path
@@ -106,7 +106,7 @@ fun ToolChangeCard(change: FileChange) {
     }
 }
 
-/** `+新增 −删除`；两侧都为 0（写了同样的内容）时不渲染任何数字。 */
+/** `+added −removed`; when both sides are 0 (the same content was written) no number is rendered at all. */
 @Composable
 private fun ChangeCounts(change: FileChange) {
     val added = change.addedLines
@@ -131,7 +131,7 @@ private fun ChangeCounts(change: FileChange) {
     }
 }
 
-/** 一行差异：前缀字符 + 等宽正文。单行不折行 —— 折行会让 diff 的行号感彻底消失。 */
+/** One diff line: prefix character + monospace body. Single line, no wrapping -- wrapping would destroy the diff's sense of line numbers entirely. */
 @Composable
 private fun DiffLine(line: TextDiff.Line) {
     val color = when (line.kind) {
@@ -150,11 +150,11 @@ private fun DiffLine(line: TextDiff.Line) {
 }
 
 /**
- * 会话底部的「新增文件」卡片（v1.5，Codex 等 work agent 的收尾卡片）：只列 agent 真正
- * **新建**的文件，点一行跳到该文件的预览页。
+ * The "new files" card at the bottom of the session (v1.5, the wrap-up card of work agents like Codex): lists only the
+ * files the agent actually **created**; tapping a row jumps to that file's preview page.
  *
- * 它和工具条目下的 diff 卡片分工不同：diff 回答"改了什么"，这张卡片回答"现在有什么"，
- * 所以它是新增文件的**跳板**，不是改动日志（日志已经贴在各自的位置上了）。
+ * It divides labour differently from the diff card under a tool entry: the diff answers "what changed", this card answers "what now exists",
+ * so it is a **springboard** into new files, not a change log (the log is already attached at each of its own positions).
  */
 @Composable
 fun NewFilesCard(files: List<FileChange>, onOpen: (String) -> Unit) {

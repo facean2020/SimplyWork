@@ -1,51 +1,57 @@
 package com.yangz3720.simplywork.core.agent
 
 /**
- * 上下文预算的推导（v1.1，用户定调）——**纯函数**，JVM 可测，不碰网络也不碰存储。
+ * Deriving the context budget (v1.1, the user set the tone) -- a **pure function**, testable on the
+ * JVM, touching neither network nor storage.
  *
- * 背景：压缩阈值与工作窗口原先写死在 [AgentConfig]（24k / 12k），对现代长上下文模型
- * 来说太小 —— 模型明明能装 200k，却在 24k 就开始压缩，白白丢掉还能留着的历史。
- * 所以预算改为按模型**自身**的上下文长度推出来。
+ * Background: the compaction trigger and the working window used to be hard-coded in [AgentConfig]
+ * (24k / 12k), which is too small for modern long-context models -- a model can plainly hold 200k,
+ * yet compaction kicked in at 24k and threw away history it could have kept. So the budget is now
+ * derived from the model's **own** context length.
  *
- * 推导规则（用户原话："1M及以上就砍到200K，不到1M的砍一半，但是砍的下限是200K，
- * 但是若模型上下文不足200K则按照模型本身的上下文来进行"）：
+ * Derivation rule (the user's own words, faithfully translated: "1M and above gets cut to 200K,
+ * anything under 1M gets halved, but the lower bound of the cut is 200K, and if the model's own
+ * context is under 200K then go by the model's own context"):
  *
- * | 模型上下文 L | 预算 |
+ * | Model context L | Budget |
  * |---|---|
- * | L < 200K | L（模型本身不够，就按它本身的来） |
- * | 200K ≤ L < 1M | max(L/2, 200K) |
- * | L ≥ 1M | 200K |
+ * | L < 200K | L (the model itself is smaller, so go by its own) |
+ * | 200K <= L < 1M | max(L/2, 200K) |
+ * | L >= 1M | 200K |
  *
- * 注意这条规则在 L=1M 处**不连续**：L=999K → 499.5K，L=1M → 200K。这是规则的字面
- * 结果（1M 以上的模型按"够用就好"处理），实现照办，没有自作主张地把它改成单调函数。
+ * Note this rule is **discontinuous** at L=1M: L=999K -> 499.5K, L=1M -> 200K. That is the literal
+ * result of the rule (models of 1M and above are treated as "enough is enough"), and the
+ * implementation follows it rather than taking it upon itself to make it monotonic.
  */
 object ContextBudget {
 
-    /** 预算下限：低于这个值就不再"对半砍"。 */
+    /** Budget floor: below this value we stop "halving". */
     const val FLOOR_TOKENS = 200_000
 
-    /** 划入"超大上下文"的门槛，达到即只给 [FLOOR_TOKENS]。 */
+    /** Threshold for counting as "huge context"; at or above it you only get [FLOOR_TOKENS]. */
     const val HUGE_CONTEXT_TOKENS = 1_000_000
 
     /**
-     * 模型上下文未知时的预算。等于 [AgentConfig] 的历史默认值：拿不到信息时行为与
-     * 旧版本完全一致，不会因为"改了个设置页"就悄悄改变压缩时机。
+     * Budget when the model context is unknown. Equals [AgentConfig]'s historical default: with no
+     * information available the behaviour is exactly that of the old version, so "we changed a
+     * settings page" never silently moves when compaction happens.
      */
     const val UNKNOWN_MODEL_TOKENS = 24_000
 
     /**
-     * 工作窗口占预算的比例。沿用旧默认值 12k/24k = 1/2：预算变大时"保留多少不压缩的
-     * 近期历史"跟着同比放大，而不是留一个 12k 的绝对值把大预算浪费掉。
+     * The working window's share of the budget. Keeps the old default 12k/24k = 1/2: as the budget
+     * grows, "how much uncompacted recent history is kept" grows in step, instead of leaving a flat
+     * 12k that wastes a large budget.
      */
     const val WORKING_WINDOW_RATIO = 2
 
-    /** 预算 → 压缩阈值（等于预算本身：装不下就压）。 */
+    /** Budget -> compaction trigger (equal to the budget itself: compact once it no longer fits). */
     fun compactionTriggerTokens(limit: Int?): Int = derive(limit)
 
-    /** 预算 → 工作窗口 token 上限。 */
+    /** Budget -> working window token cap. */
     fun workingTokenBudget(budgetTokens: Int): Int = (budgetTokens / WORKING_WINDOW_RATIO).coerceAtLeast(1)
 
-    /** 见类注释的表格。`null` / 非正数 = 未知 → [UNKNOWN_MODEL_TOKENS]。 */
+    /** See the class-comment table. `null` / non-positive = unknown -> [UNKNOWN_MODEL_TOKENS]. */
     fun derive(modelContextTokens: Int?): Int {
         val limit = modelContextTokens ?: return UNKNOWN_MODEL_TOKENS
         if (limit <= 0) return UNKNOWN_MODEL_TOKENS
@@ -57,11 +63,16 @@ object ContextBudget {
     }
 
     /**
-     * 从模型名里读上下文长度 —— 有些 OpenAI 兼容端点（自建/本地部署）不在 /models 里
-     * 返回上下文，但会把规格写进模型名，如 `qwen2.5-32k`、`llama-3.1-128k`、`xxx-1m`。
+     * Read the context length out of the model name -- some OpenAI-compatible endpoints
+     * (self-hosted / local deployments) do not return a context in /models, but do write the spec
+     * into the model name, e.g. `qwen2.5-32k`, `llama-3.1-128k`, `xxx-1m`.
      *
-     * 刻意**只认名字里显式写出的规格**，不维护"模型名 → 上下文"的对照表：那种表发布
-     * 新模型就会过期，而错误地高估模型上下文，代价是请求被服务端直接拒掉。
+     * Deliberately honours **only a spec written explicitly in the name**; we do not maintain a
+     * "model name -> context" table here: such a table goes stale as soon as a new model ships, and
+     * wrongly overestimating a model's context costs a request the server rejects outright. Models
+     * whose factory spec is known and whose name says nothing go through [ModelContextTable]
+     * (v1.6) -- it ranks **after** this function in the arbitration order, because a marker in the
+     * name means "this endpoint is declaring its own window", which is more specific.
      */
     fun fromModelName(modelId: String): Int? {
         val match = SIZE_MARKER.find(modelId) ?: return null
@@ -73,33 +84,38 @@ object ContextBudget {
         }
     }
 
-    /** `128k` / `1m` 这类规格标记；必须紧贴词边界，免得从别的数字里截出一段。 */
+    /** Spec markers like `128k` / `1m`; must sit on a word boundary so we never carve one out of another digit run. */
     private val SIZE_MARKER = Regex("""(?:^|[-_ ])(\d{1,4})([km])(?:$|[-_ .])""", RegexOption.IGNORE_CASE)
 
     /**
-     * 最终预算的裁决点。顺序即可信度：手动 > 服务商报的 > 模型名规格 > 默认。
+     * The arbitration point for the final budget. The order is the confidence order:
+     * manual > what the provider reports > the spec in the model name > built-in table > default.
      *
-     * 手动设置时仍把"模型本身多大"一并带出来（[ContextBudgetPlan.modelContextTokens]）：
-     * 设置页要能显示"你定的是 64k，而这模型本身有 128k"，否则用户没法判断自己设得多偏。
+     * When the value is manual we still carry "how big the model itself is" along
+     * ([ContextBudgetPlan.modelContextTokens]): the settings page has to be able to show "you set
+     * 64k, but this model itself has 128k", otherwise the user cannot tell how far off their own
+     * setting is.
      */
     fun resolve(overrideTokens: Int?, providerTokens: Int?, modelId: String): ContextBudgetPlan {
-        val knownModelTokens = providerTokens?.takeIf { it > 0 } ?: fromModelName(modelId)
+        val reported = providerTokens?.takeIf { it > 0 }
+        val fromName = fromModelName(modelId)
+        val fromTable = ModelContextTable.lookup(modelId)
+        val knownModelTokens = reported ?: fromName ?: fromTable
         overrideTokens?.takeIf { it > 0 }?.let { manual ->
             return ContextBudgetPlan(manual, knownModelTokens, ContextBudgetPlan.Source.Manual)
         }
-        providerTokens?.takeIf { it > 0 }?.let { reported ->
-            return ContextBudgetPlan(derive(reported), reported, ContextBudgetPlan.Source.Provider)
-        }
-        fromModelName(modelId)?.let { fromName ->
-            return ContextBudgetPlan(derive(fromName), fromName, ContextBudgetPlan.Source.ModelName)
-        }
+        reported?.let { return ContextBudgetPlan(derive(it), it, ContextBudgetPlan.Source.Provider) }
+        fromName?.let { return ContextBudgetPlan(derive(it), it, ContextBudgetPlan.Source.ModelName) }
+        fromTable?.let { return ContextBudgetPlan(derive(it), it, ContextBudgetPlan.Source.BuiltIn) }
         return ContextBudgetPlan(derive(null), null, ContextBudgetPlan.Source.Default)
     }
 }
 
 /**
- * 预算的最终取值 + **它是怎么来的**。设置页要如实告诉用户"这个数是你自己定的 / 服务商
- * 报的 / 从模型名读的 / 未知所以退回默认"，否则一个自动推导的数字看起来像随机数。
+ * The budget's final value plus **where it came from**. The settings page has to tell the user
+ * faithfully "this number is one you set / one the provider reported / one read from the model name
+ * / unknown so we fell back to the default", otherwise an auto-derived number looks like a random
+ * one.
  */
 data class ContextBudgetPlan(
     val tokens: Int,
@@ -107,22 +123,29 @@ data class ContextBudgetPlan(
     val source: Source
 ) {
     enum class Source {
-        /** 用户手动指定。 */
+        /** Set manually by the user. */
         Manual,
 
-        /** 服务商在 /models 里报的上下文长度。 */
+        /** Context length the provider reports in /models. */
         Provider,
 
-        /** 从模型名里的规格标记读出来的。 */
+        /** Read out of the spec marker in the model name. */
         ModelName,
 
-        /** 模型上下文未知 → 退回历史默认值。 */
+        /**
+         * Read out of [ModelContextTable]'s built-in table. Official endpoints generally do not
+         * report a context, so this is the most common rung; the table lags behind the model
+         * catalogue, so the settings page must say so faithfully and offer a manual override.
+         */
+        BuiltIn,
+
+        /** Model context unknown -> fall back to the historical default. */
         Default
     }
 
-    /** 压缩阈值：装不下就压。 */
+    /** Compaction trigger: compact once it no longer fits. */
     val compactionTriggerTokens: Int get() = tokens
 
-    /** 工作窗口上限：预算的一半左右留给不压缩的近况。 */
+    /** Working window cap: roughly half the budget is left for uncompacted recent history. */
     val workingTokenBudget: Int get() = ContextBudget.workingTokenBudget(tokens)
 }

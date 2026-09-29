@@ -7,11 +7,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 
 /**
- * 破坏性删除的统一确认弹窗（项目与会话共用）。措辞交给调用方 —— 两处"删掉的是什么、
- * 还有哪些东西会跟着没"差别很大，弹窗只负责"必须先确认"这一件事。
+ * The shared confirmation dialog for destructive deletion (shared by projects and sessions). The wording is left to the caller -- what gets deleted and
+ * what else disappears along with it differs a lot between the two call sites, so the dialog only owns one thing: "you must confirm first".
  *
- * [onConfirm] 为 null 时退化为**告知**弹窗（只有一个"知道了"）：用于"默认项目不可删除"
- * 这类点了也没用的情况 —— 静默不响应比说清楚更让人困惑。
+ * When [onConfirm] is null it degrades into a **notice** dialog (only a "got it" button): for cases like "the default project cannot be
+ * deleted" where tapping would do nothing anyway -- being silently unresponsive is more confusing than spelling it out.
  */
 @Composable
 internal fun ConfirmDeleteDialog(

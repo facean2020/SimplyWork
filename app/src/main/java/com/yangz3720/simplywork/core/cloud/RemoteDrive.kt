@@ -1,12 +1,12 @@
 package com.yangz3720.simplywork.core.cloud
 
 /**
- * 云端条目 —— Graph `driveItem` 对本应用的最小投影。只保留镜像同步真正需要的东西：
- * `id`（主键）、`name`/`parentId`（推导逻辑路径）、`eTag`（变更判据）、
- * `modifiedAtMs`（展示与冲突提示）、`deleted`（增量删除标记）。
+ * Cloud item -- the minimal projection of a Graph `driveItem` for this app. Only what mirror sync actually needs is kept:
+ * `id` (primary key), `name`/`parentId` (to derive the logical path), `eTag` (change criterion),
+ * `modifiedAtMs` (display and conflict hints), `deleted` (incremental deletion marker).
  *
- * 删除项只有 [id] 可靠：Graph 在 delta 里对已删除条目不保证返回 name/parent，
- * 所以删除必须靠本地清单把 `id` 反查回路径（见 [ProjectSyncEngine]）。
+ * Only [id] is reliable for a deleted item: in a delta Graph does not guarantee name/parent for deleted entries,
+ * so deletions must look `id` back up to a path through the local manifest (see [ProjectSyncEngine]).
  */
 data class RemoteItem(
     val id: String,
@@ -20,11 +20,11 @@ data class RemoteItem(
 )
 
 /**
- * 一次 delta 查询的结果。
+ * The result of one delta query.
  *
- * [reset] = true 表示这是一次**全量枚举**（首次绑定、或游标过期 HTTP 410 后重建），
- * 此时 [items] 是云端该文件夹的完整现状，而不仅是变化量 —— 引擎据此把"清单里有、
- * 枚举里没有"的条目标记为云端已删除。增量为 false，未出现的条目不代表被删。
+ * [reset] = true means this was a **full enumeration** (first bind, or a rebuild after the cursor expired with HTTP 410);
+ * [items] is then the complete current state of that cloud folder, not just the deltas -- the engine uses this to mark entries "present in the
+ * manifest but absent from the enumeration" as deleted in the cloud. When the delta is false, an absent entry does not mean it was deleted.
  */
 data class RemoteDelta(
     val items: List<RemoteItem>,
@@ -32,36 +32,36 @@ data class RemoteDelta(
     val reset: Boolean
 )
 
-/** 云端 delta 游标失效（HTTP 410 Gone）时的显式信号，由引擎决定是否重建基线。 */
+/** Explicit signal that the cloud delta cursor is invalid (HTTP 410 Gone); the engine decides whether to rebuild the baseline. */
 class DeltaCursorExpired(message: String) : Exception(message)
 
 /**
- * 云端驱动器端口（OneDrive 实现见 `infrastructure/cloud/onedrive/OneDriveGraphClient`，
- * JVM 单测用内存 fake）。刻意保持窄：镜像同步只需要这几件事。
+ * Cloud drive port (the OneDrive implementation lives in `infrastructure/cloud/onedrive/OneDriveGraphClient`,
+ * with an in-memory fake for JVM unit tests). Deliberately narrow: mirror sync needs only these few things.
  *
- * 约定：所有方法在失败时抛异常（含 [DeltaCursorExpired]），由 [ProjectSyncEngine]
- * 决定重试或上报 —— 端口层不做静默降级（P2）。
+ * Contract: all methods throw on failure (including [DeltaCursorExpired]), and [ProjectSyncEngine]
+ * decides whether to retry or report -- the port layer does no silent degradation (P2).
  */
 interface RemoteDrive {
 
-    /** 取文件夹元数据；不是文件夹或不存在时抛异常。 */
+    /** Fetches folder metadata; throws when it is not a folder or does not exist. */
     suspend fun folder(folderId: String): RemoteItem
 
-    /** 在 [parentFolderId] 下列子项（文件夹选择器用，不参与增量同步）。 */
+    /** Lists children under [parentFolderId] (used by the folder picker, not part of incremental sync). */
     suspend fun children(folderId: String): List<RemoteItem>
 
-    /** 创建文件夹；同名已存在时由实现方决定返回既有项（Graph 用 fail 冲突策略）。 */
+    /** Creates a folder; when one with the same name already exists the implementation decides whether to return the existing item (Graph uses the fail conflict behaviour). */
     suspend fun createFolder(parentFolderId: String, name: String): RemoteItem
 
     /**
-     * 增量枚举 [folderId] 子树。[deltaLink] 为 null 走全量（[RemoteDelta.reset] = true）。
-     * 游标过期时抛 [DeltaCursorExpired]，由调用方以 null 重试。
+     * Incrementally enumerates the [folderId] subtree. A null [deltaLink] does a full enumeration ([RemoteDelta.reset] = true).
+     * When the cursor has expired it throws [DeltaCursorExpired], and the caller retries with null.
      */
     suspend fun delta(folderId: String, deltaLink: String?): RemoteDelta
 
     suspend fun download(itemId: String): ByteArray
 
-    /** 新建或覆盖 [parentFolderId]/[fileName]（大小限制由实现方处理）。 */
+    /** Creates or overwrites [parentFolderId]/[fileName] (size limits are handled by the implementation). */
     suspend fun upload(parentFolderId: String, fileName: String, bytes: ByteArray): RemoteItem
 
     suspend fun deleteItem(itemId: String)
