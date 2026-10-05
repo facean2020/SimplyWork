@@ -7,11 +7,15 @@ import android.app.Application
  */
 class SimplyWorkApp : Application() {
 
-    lateinit var container: AppContainer
-        private set
+    companion object {
+        lateinit var instance: SimplyWorkApp
+        lateinit var container: AppContainer
+            private set
+    }
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         container = AppContainer(this)
     }
 }

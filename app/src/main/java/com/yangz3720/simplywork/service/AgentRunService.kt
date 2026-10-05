@@ -47,7 +47,7 @@ class AgentRunService : Service() {
     private var observing = false
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val container = (application as SimplyWorkApp).container
+        val container = SimplyWorkApp.container
 
         if (intent?.action == ACTION_STOP) {
             container.runSupervisor.stop()
