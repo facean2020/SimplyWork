@@ -107,6 +107,24 @@ class AgentWorkspace(private val root: File) {
         return WriteResult(path = relativePath, bytesWritten = bytes.size.toLong(), totalBytes = file.length(), created = !existed)
     }
 
+    /**
+     * Resolves a **write target** to a real [File], for callers that cannot hand their bytes to
+     * [write]/[writeBytes] -- the TTS engine wants a file descriptor to write into, not an array.
+     *
+     * Same path safety as the internal writers (relative path, must stay inside the project; absolute
+     * paths and `../` escapes are refused, [resolveForWrite]); parent directories are created
+     * (mkdir -p). The caller is the one that fills the file, so it also owns the size cap that [write]
+     * would otherwise have applied.
+     */
+    fun fileForWrite(projectId: String, relativePath: String): File {
+        val file = resolveForWrite(projectId, relativePath)
+        if (file.isDirectory) {
+            throw WorkspaceException("'$relativePath' is a directory, not a file")
+        }
+        file.parentFile?.mkdirs()
+        return file
+    }
+
     /** Writes a file; parent directories are created automatically (mkdir -p semantics); [append] defaults to overwrite. */
     fun write(projectId: String, relativePath: String, content: String, append: Boolean = false): WriteResult {
         require(content.encodeToByteArray().size <= maxFileBytes) {

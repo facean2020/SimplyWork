@@ -14,6 +14,7 @@ import com.yangz3720.simplywork.core.agent.ScriptJobRegistry
 import com.yangz3720.simplywork.core.agent.tool.AgentSelfConfig
 import com.yangz3720.simplywork.core.agent.tool.ScriptTools
 import com.yangz3720.simplywork.core.agent.tool.SelfOpsTools
+import com.yangz3720.simplywork.core.agent.tool.TtsTool
 import com.yangz3720.simplywork.core.cloud.OneDriveOwner
 import com.yangz3720.simplywork.core.session.ProjectStore
 import com.yangz3720.simplywork.core.workspace.AgentWorkspace
@@ -101,6 +102,11 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
      * control point of "lazy sync").
      */
     val oneDrive: OneDriveOwner by lazy { OneDriveService(appContext, projectStore, workspace) }
+
+    /**
+     * Global access point of Context.
+     */
+    fun getContext(): Context { return appContext }
 
     /** Config self-operation seam (v1.3): the agent's self_config_read/update goes through here, same source as the UI. */
     private val selfConfig = object : AgentSelfConfig {
@@ -385,7 +391,8 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
                     workspace = workspace,
                     projects = projectStore,
                     changes = changeLog
-                ) + ScriptTools.registeredTools(scriptJobs)
+                ) + ScriptTools.registeredTools(scriptJobs) +
+                    TtsTool.registeredTool(appContext, workspace, projectStore)
             }
         )
 
