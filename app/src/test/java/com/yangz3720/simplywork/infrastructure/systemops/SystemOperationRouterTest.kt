@@ -83,7 +83,14 @@ class SystemOperationRouterTest {
             calendarQuery to { router.execute(it) },
             location to { router.execute(it) }
         )
-        specs.forEach { (spec, call) -> assertEquals("$spec", clipboardSuccess, call(spec)) }
+        // The router stamps executionTimeMs from a real clock, so the receipt is compared with that field zeroed:
+        // asserting a measured duration makes this case fail whenever a no-op dispatch happens to take a millisecond
+        // or two under load. What this case is here to check is the dispatch, and the executions below pin that down.
+        specs.forEach { (spec, call) ->
+            val result = call(spec)
+            assertTrue("$spec -> $result", result is SystemOperationResult.Success)
+            assertEquals("$spec", clipboardSuccess, (result as SystemOperationResult.Success).copy(executionTimeMs = 0))
+        }
 
         coVerify(exactly = 1) { executor.launchDeepLink("https://x", LaunchContext.AUTO) }
         coVerify(exactly = 1) { executor.openApp("com.a") }
