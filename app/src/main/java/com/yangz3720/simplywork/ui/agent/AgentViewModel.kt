@@ -1,5 +1,6 @@
 package com.yangz3720.simplywork.ui.agent
 
+import android.Manifest
 import android.app.Activity
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -129,6 +130,9 @@ class AgentViewModel(
 
     /** Pending runtime permission request (v1.2); when non-null the UI triggers the system grant dialog. */
     val permission = permissionCoordinator.pending
+
+    /** v1.6: POST_NOTIFICATIONS is asked at most once per process (see [ensureNotificationPermission]). */
+    private var notificationPermissionRequested = false
 
     init {
         viewModelScope.launch(ioDispatcher) {
@@ -581,6 +585,28 @@ class AgentViewModel(
     /** Feed back the result of the system grant dialog (v1.2). The executor still re-checks permissions; this only reports "what the user chose". */
     fun respondPermission(granted: Boolean) {
         permissionCoordinator.respond(granted)
+    }
+
+    /**
+     * v1.6: the foreground service's persistent notification is the only visible sign that a task keeps
+     * running once the app is in the background, and on Android 13+ (minSdk 34 here) the system **drops
+     * that notification** while POST_NOTIFICATIONS is not granted -- the service still runs, but the
+     * notification drawer stays empty, so "running in the foreground" looks like it does not work.
+     *
+     * Asked once per process, on first composition: a permission that is already granted resolves without
+     * a dialog, and a denial is not re-asked (the platform itself stops showing the dialog after two
+     * denials, and asking again on every run would only be noise). No prior state check is needed --
+     * the system answers an already-granted permission immediately, and this VM has no Context.
+     */
+    fun ensureNotificationPermission() {
+        if (notificationPermissionRequested) return
+        notificationPermissionRequested = true
+        viewModelScope.launch(ioDispatcher) {
+            permissionCoordinator.request(
+                listOf(Manifest.permission.POST_NOTIFICATIONS),
+                "需要通知权限，才能在任务执行期间显示常驻通知（离开应用后继续运行）"
+            )
+        }
     }
 
     // ----- Provider / model selection -----

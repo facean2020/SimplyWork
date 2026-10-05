@@ -45,6 +45,13 @@ fun AgentApp(viewModel: AgentViewModel) {
         }
     }
 
+    // v1.6: the foreground service only shows its persistent notification once POST_NOTIFICATIONS is
+    // granted, and nothing else in the app ever asks for it -- without it a run keeps going in the
+    // background but the notification drawer stays empty. Asked once per process (see the VM).
+    LaunchedEffect(Unit) {
+        viewModel.ensureNotificationPermission()
+    }
+
     when (screen) {
         AppScreen.Agent ->
             AgentScreen(

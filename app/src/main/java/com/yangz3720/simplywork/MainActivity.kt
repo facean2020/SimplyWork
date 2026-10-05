@@ -14,7 +14,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        val container = (application as SimplyWorkApp).container
+        val container = SimplyWorkApp.container
         val viewModel: AgentViewModel = ViewModelProvider(
             this,
             object : ViewModelProvider.Factory {

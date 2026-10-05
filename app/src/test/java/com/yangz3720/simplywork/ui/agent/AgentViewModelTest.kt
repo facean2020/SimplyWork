@@ -1,5 +1,6 @@
 package com.yangz3720.simplywork.ui.agent
 
+import android.Manifest
 import android.app.Activity
 import android.content.SharedPreferences
 import com.yangz3720.simplywork.core.AgentRunSupervisor
@@ -436,6 +437,37 @@ class AgentViewModelTest {
 
         assertEquals(account, owner.fetchedAccount)
         assertEquals(listOf("m1", "m2"), result.getOrThrow())
+    }
+
+    @Test
+    fun `the notification permission is asked once per process through the shared coordinator`() {
+        val coordinator = PermissionCoordinator()
+        val owner = FakeOwner(buildRuntime(ScriptedProvider(response("x"))))
+        val vm = AgentViewModel(
+            owner,
+            runSupervisor(owner),
+            ApprovalCoordinator(),
+            coordinator,
+            fakeProjects(),
+            FakeOneDrive(),
+            files()
+        )
+
+        vm.ensureNotificationPermission()
+        waitFor { coordinator.pending.value != null }
+        assertEquals(
+            listOf(Manifest.permission.POST_NOTIFICATIONS),
+            coordinator.pending.value?.permissions
+        )
+
+        // The dialog's answer lands back through the same coordinator; after that a second call must not
+        // ask again (a foreground notification is worthless if the user is nagged for it every launch).
+        vm.respondPermission(true)
+        waitFor { coordinator.pending.value == null }
+
+        vm.ensureNotificationPermission()
+        Thread.sleep(100)
+        assertNull(coordinator.pending.value)
     }
 
     // ----- edit and resend (branch semantics) -----
