@@ -13,6 +13,8 @@ import com.yangz3720.simplywork.core.cloud.OneDriveOwner
 import com.yangz3720.simplywork.core.session.ProjectLogic
 import com.yangz3720.simplywork.core.session.ProjectStore
 import com.yangz3720.simplywork.core.session.SessionRecord
+import com.yangz3720.simplywork.core.workspace.ExternalPreview
+import com.yangz3720.simplywork.core.workspace.ExternalPreviewException
 import com.yangz3720.simplywork.core.workspace.FileChange
 import com.yangz3720.simplywork.core.workspace.FileChangeKind
 import com.yangz3720.simplywork.core.workspace.FileKinds
@@ -105,6 +107,8 @@ class AgentViewModel(
     private val oneDrive: OneDriveOwner,
     /** Project files seam (v1.5): read-only browsing / preview + the session change log. */
     private val projectFiles: ProjectFilesOwner,
+    /** External preview seam (v1.7): types this app cannot render (audio, images) go to an outside app instead of pulling a decoder/player into the build. */
+    private val externalPreview: ExternalPreview,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : ViewModel() {
 
@@ -434,6 +438,32 @@ class AgentViewModel(
                 onFailure = { FilePreview(path = path, notice = "无法读取该文件") }
             )
             _uiState.update { it.copy(filePreview = preview) }
+        }
+    }
+
+    /**
+     * Hand the file currently on the preview page to an outside app (v1.7).
+     *
+     * The reason this exists: inline preview only understands text, and packing a decoder plus a player for every
+     * media type into the app is not a trade worth making. Failures land in [FilePreview.notice] on the page itself
+     * rather than in a toast -- the user is looking at that page, and it is already where "why you cannot see this
+     * file" is stated (see [openFilePreview]).
+     */
+    fun openFileExternally() {
+        val preview = _uiState.value.filePreview ?: return
+        val projectId = _uiState.value.currentProjectId
+        viewModelScope.launch(ioDispatcher) {
+            externalPreview.open(projectId, preview.path).onFailure { error ->
+                val message = (error as? ExternalPreviewException)?.message ?: "无法用外部应用打开该文件"
+                // Only write to the page if it is still showing the same file: a slow launch failure must not stamp a
+                // notice onto a file the user has already navigated away from.
+                _uiState.update { state ->
+                    state.filePreview
+                        ?.takeIf { it.path == preview.path }
+                        ?.let { state.copy(filePreview = it.copy(notice = message)) }
+                        ?: state
+                }
+            }
         }
     }
 

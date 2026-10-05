@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  v1.7 external preview: which part of private storage the FileProvider may hand out.
+
+  Exactly one subtree, <filesDir>/agent_workspace/, because that is the whole sandbox and the only thing worth
+  exporting. Everything else under filesDir (session stores, the change log, ...) stays unreachable; if a future need
+  contradicts that, it gets its own entry and its own argument, not a catch-all root-path.
+-->
+<paths>
+    <files-path name="agent_workspace" path="agent_workspace/" />
+</paths>

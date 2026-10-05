@@ -27,7 +27,8 @@ class MainActivity : ComponentActivity() {
                         container.permissionCoordinator,
                         container.projectStore,
                         container.oneDrive,
-                        container.projectFiles
+                        container.projectFiles,
+                        container.externalPreview
                     ) as T
             }
         )[AgentViewModel::class.java]

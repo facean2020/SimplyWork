@@ -48,6 +48,21 @@ class AgentWorkspaceTest {
     }
 
     @Test
+    fun `fileForRead resolves an existing file under the same path rules`() {
+        val ws = workspace()
+        ws.write("p1", "docs/notes.md", "hello")
+
+        assertEquals(
+            File(tmp.root, "p1/docs/notes.md").canonicalPath,
+            ws.fileForRead("p1", "docs/notes.md").canonicalPath
+        )
+        // A directory is not a readable file, and neither is a path that escapes or goes absolute
+        assertThrows(IllegalStateException::class.java) { ws.fileForRead("p1", "docs") }
+        assertThrows(WorkspaceException::class.java) { ws.fileForRead("p1", "../secret.txt") }
+        assertThrows(IllegalArgumentException::class.java) { ws.fileForRead("p1", "/etc/passwd") }
+    }
+
+    @Test
     fun `invalid project id is refused`() {
         val ws = workspace()
         assertThrows(IllegalArgumentException::class.java) { ws.projectDir("../evil") }

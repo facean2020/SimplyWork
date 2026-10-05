@@ -125,6 +125,17 @@ class AgentWorkspace(private val root: File) {
         return file
     }
 
+    /**
+     * Resolves an **existing** file to a real [File], for callers that cannot work off the bytes alone --
+     * the v1.7 external preview hands a file to `FileProvider`, which insists on a File.
+     *
+     * Same path safety as [read] (`resolve`): relative path, still inside the project after canonicalization,
+     * and it must actually be a regular file. This is a **leak of the sandbox's absolute location to our own
+     * process only** -- it never reaches the model, and every tool still refuses absolute paths.
+     */
+    fun fileForRead(projectId: String, relativePath: String): File =
+        resolve(projectId, relativePath, what = "a regular file") { it.isFile }
+
     /** Writes a file; parent directories are created automatically (mkdir -p semantics); [append] defaults to overwrite. */
     fun write(projectId: String, relativePath: String, content: String, append: Boolean = false): WriteResult {
         require(content.encodeToByteArray().size <= maxFileBytes) {

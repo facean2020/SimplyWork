@@ -86,7 +86,11 @@ fun AgentApp(viewModel: AgentViewModel) {
     }
 
     state.filePreview?.let { preview ->
-        FilePreviewSheet(preview = preview, onDismiss = { viewModel.closeFilePreview() })
+        FilePreviewSheet(
+            preview = preview,
+            onDismiss = { viewModel.closeFilePreview() },
+            onOpenExternally = { viewModel.openFileExternally() }
+        )
     }
 }
 

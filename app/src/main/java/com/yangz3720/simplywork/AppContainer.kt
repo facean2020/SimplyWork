@@ -18,6 +18,7 @@ import com.yangz3720.simplywork.core.agent.tool.TtsTool
 import com.yangz3720.simplywork.core.cloud.OneDriveOwner
 import com.yangz3720.simplywork.core.session.ProjectStore
 import com.yangz3720.simplywork.core.workspace.AgentWorkspace
+import com.yangz3720.simplywork.core.workspace.ExternalPreview
 import com.yangz3720.simplywork.core.workspace.FileChangeLog
 import com.yangz3720.simplywork.core.workspace.JsonFileChangeLog
 import com.yangz3720.simplywork.core.workspace.LocalProjectFiles
@@ -28,6 +29,7 @@ import com.yangz3720.simplywork.infrastructure.model.ModelProvider
 import com.yangz3720.simplywork.infrastructure.model.client.OpenAiCompatibleClient
 import com.yangz3720.simplywork.infrastructure.model.config.ModelConfig
 import com.yangz3720.simplywork.infrastructure.model.config.ProviderAccount
+import com.yangz3720.simplywork.infrastructure.preview.AndroidExternalPreview
 import com.yangz3720.simplywork.infrastructure.sandbox.engine.QuickJsSandbox
 import com.yangz3720.simplywork.infrastructure.systemops.SystemCapabilityProbeImpl
 import com.yangz3720.simplywork.infrastructure.systemops.SystemOperationRouter
@@ -95,6 +97,13 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
      * [workspace], so the directory the UI sees is the very directory the agent works in.
      */
     val projectFiles: ProjectFilesOwner by lazy { LocalProjectFiles(workspace, changeLog) }
+
+    /**
+     * External preview seam (v1.7): hands a workspace file to an outside viewer/player via a FileProvider content://
+     * URI. Bound to the same [workspace] instance, so what leaves the app is exactly what the file manager shows --
+     * and path safety stays in one place (the UI never resolves a sandbox path itself).
+     */
+    val externalPreview: ExternalPreview by lazy { AndroidExternalPreview(appContext, workspace) }
 
     /**
      * OneDrive integration (v1.4): lazy wiring -- no network or MSAL initialization, only object

@@ -72,6 +72,20 @@
             </intent-filter>
         </activity>
 
+        <!-- v1.7 external preview: the sandbox lives in private storage, so "open this wav/png with another app" can
+             only work through a FileProvider content:// URI + a temporary read grant (res/xml/file_paths.xml pins the
+             exportable subtree to agent_workspace/). exported=false: no other app can pull from us unprompted, the
+             grant is what opens the door, per file, per launch. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <!-- v1.6: the foreground service that runs Agent tasks. It only keeps things alive + projects the notification, executes no logic
              (the run is driven by the process-level AgentRunSupervisor, see core/AgentRunSupervisor.kt).
              specialUse: task execution isn't one of the existing types like dataSync/mediaPlayback, so per platform requirements
