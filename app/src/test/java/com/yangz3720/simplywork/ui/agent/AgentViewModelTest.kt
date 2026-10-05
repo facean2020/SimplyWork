@@ -824,7 +824,7 @@ class AgentViewModelTest {
         runtime.repository.createSession("B 的对话", b.id)
 
         val owner = FakeOwner(runtime)
-        val vm = AgentViewModel(owner, runSupervisor(owner), ApprovalCoordinator(), PermissionCoordinator(), projects, FakeOneDrive(), files())
+        val vm = AgentViewModel(owner, runSupervisor(owner), ApprovalCoordinator(), PermissionCoordinator(), projects, FakeOneDrive(), files(), FakeExternalPreview())
         Thread.sleep(100) // init: the default project is current and owns no session
 
         // Switching has to re-filter for the project we just entered. Filtering by the id the projection still
