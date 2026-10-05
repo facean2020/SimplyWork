@@ -487,20 +487,29 @@ class AgentViewModel(
         }
     }
 
+    /**
+     * Project / current-project change -> the session list's filter changed with it, so re-read the list.
+     *
+     * The filter must use the **registry's** current project ([ProjectStore.currentId]), never the id the projection
+     * still holds: this method runs *because* the switch happened, so filtering by `it.currentProjectId` filters by the
+     * project we just left. The drawer would then list the previous project's conversations under the new project's
+     * name, and the new project's own conversations would stay out of reach until some other refresh happened to land.
+     */
     private suspend fun refreshProjectsAndSessions() {
         val all = repository()?.listSessions().orEmpty()
+        val currentProjectId = projectStore.currentId()
         _uiState.update {
-            val filtered = sessionsFor(all, it.currentProjectId)
             it.copy(
                 projects = projectStore.list(),
-                currentProjectId = projectStore.currentId(),
-                sessions = filtered
+                currentProjectId = currentProjectId,
+                sessions = sessionsFor(all, currentProjectId)
             )
         }
     }
 
+    /** The registry decides which project is current; [AgentUiState.currentProjectId] only reports it (same rule as [refreshProjectsAndSessions]). */
     private fun sessionsForCurrentProject(all: List<SessionRecord>): List<SessionRecord> =
-        sessionsFor(all, _uiState.value.currentProjectId)
+        sessionsFor(all, projectStore.currentId())
 
     /** pre-v1.3 rows (projectId=null) render as owned by the default project, never dangling. */
     private fun sessionsFor(all: List<SessionRecord>, projectId: String): List<SessionRecord> =
@@ -685,7 +694,9 @@ class AgentViewModel(
 
     private suspend fun createSessionFor(prompt: String): String {
         val title = prompt.lineSequence().firstOrNull().orEmpty().take(24).ifBlank { "新对话" }
-        val record = repository()?.createSession(title, _uiState.value.currentProjectId)
+        // Ownership comes from the registry, not from the projection: a message sent in the brief window between
+        // switching projects and the list refreshing would otherwise be filed under the project just left behind.
+        val record = repository()?.createSession(title, projectStore.currentId())
             ?: throw IllegalStateException("Runtime unavailable")
         _uiState.update {
             it.copy(
