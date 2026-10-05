@@ -86,8 +86,8 @@ android {
         minSdk = 34
         targetSdk = 35
         // V1.1: fixes the 5 UX issues of V1.0 (dialog shape, API key masking, context window, auto-approval).
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
