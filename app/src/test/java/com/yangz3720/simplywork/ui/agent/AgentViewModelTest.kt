@@ -745,4 +745,27 @@ class AgentViewModelTest {
         assertTrue(vm.uiState.value.projects.any { it.id == ProjectLogic.DEFAULT_PROJECT_ID })
         assertNotNull(runtime.repository.getSession(sessionId))
     }
+
+    @Test
+    fun `switching projects re-filters the session list for the project that is now current`() = runBlocking {
+        val projects = fakeProjects()
+        val a = projects.create("项目A").getOrThrow()
+        val b = projects.create("项目B").getOrThrow()
+        val runtime = buildRuntime(ScriptedProvider(response("noop")))
+        runtime.repository.createSession("A 的对话", a.id)
+        runtime.repository.createSession("B 的对话", b.id)
+
+        val owner = FakeOwner(runtime)
+        val vm = AgentViewModel(owner, runSupervisor(owner), ApprovalCoordinator(), PermissionCoordinator(), projects, FakeOneDrive(), files())
+        Thread.sleep(100) // init: the default project is current and owns no session
+
+        // Switching has to re-filter for the project we just entered. Filtering by the id the projection still
+        // held (the previous project) yields "the previous project's conversations under the new project's name",
+        // and the new project's own conversations are not reachable until something else refreshes the list.
+        vm.switchProject(a.id)
+        waitFor { vm.uiState.value.currentProjectId == a.id && vm.uiState.value.sessions.map { it.title } == listOf("A 的对话") }
+
+        vm.switchProject(b.id)
+        waitFor { vm.uiState.value.currentProjectId == b.id && vm.uiState.value.sessions.map { it.title } == listOf("B 的对话") }
+    }
 }
