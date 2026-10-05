@@ -34,6 +34,12 @@ import com.mikepenz.markdown.m3.markdownTypography
 /**
  * File preview page (v1.5): Markdown rendering / monospace plain text / an explicit "not supported".
  *
+ * v1.7: an **"open with an outside app"** entry sits next to the title, always -- not only for the types this page
+ * cannot render. A png is the obvious case, but the same button is the way out for "I want to edit this .md in my own
+ * editor" and "play this .wav", and there is no reason for the user to learn two different rules about which files
+ * can leave the app. It is a plain [TextButton]: what happens on the other side is somebody else's UI, so there is
+ * nothing here to reflect except the failure notice.
+ *
  * Both entry points share this one page: the "new files" card at the bottom of the session, and a file row in the file manager --
  * so "how you got here" does not change what you see.
  *
@@ -47,7 +53,11 @@ import com.mikepenz.markdown.m3.markdownTypography
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FilePreviewSheet(preview: FilePreview, onDismiss: () -> Unit) {
+fun FilePreviewSheet(
+    preview: FilePreview,
+    onDismiss: () -> Unit,
+    onOpenExternally: () -> Unit
+) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
@@ -73,6 +83,9 @@ fun FilePreviewSheet(preview: FilePreview, onDismiss: () -> Unit) {
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+                TextButton(onClick = onOpenExternally) {
+                    Text("外部打开", style = MaterialTheme.typography.labelLarge)
                 }
                 TextButton(onClick = onDismiss) {
                     Text("关闭", style = MaterialTheme.typography.labelLarge)

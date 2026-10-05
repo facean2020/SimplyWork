@@ -21,6 +21,8 @@ import com.yangz3720.simplywork.core.session.TodoStatus
 import com.yangz3720.simplywork.core.session.store.InMemoryPayloadStore
 import com.yangz3720.simplywork.core.session.store.InMemorySessionStore
 import com.yangz3720.simplywork.core.workspace.AgentWorkspace
+import com.yangz3720.simplywork.core.workspace.ExternalPreview
+import com.yangz3720.simplywork.core.workspace.ExternalPreviewException
 import com.yangz3720.simplywork.core.workspace.FileChange
 import com.yangz3720.simplywork.core.workspace.FileChangeKind
 import com.yangz3720.simplywork.core.workspace.FileChangeLog
@@ -161,6 +163,22 @@ class AgentViewModelTest {
         }
     }
 
+    /**
+     * Dummy implementation of the external-preview seam (v1.7): launching an Android intent is not something a JVM test
+     * can observe, so what is asserted here is the interesting half -- which project/path we hand over, and what the
+     * preview page says when an outside app cannot take the file.
+     */
+    private class FakeExternalPreview(
+        private val failure: ExternalPreviewException? = null
+    ) : ExternalPreview {
+        var opened: Pair<String, String>? = null
+
+        override suspend fun open(projectId: String, path: String): Result<Unit> {
+            opened = projectId to path
+            return if (failure == null) Result.success(Unit) else Result.failure(failure)
+        }
+    }
+
     /** Dummy implementation of the self_* config seam: this file only borrows it to register the fs_* tools, and does not cover self-editing config. */
     private class FakeSelfConfig : AgentSelfConfig {
         override fun snapshot() = AgentSelfConfig.Snapshot(
@@ -271,7 +289,8 @@ class AgentViewModelTest {
 
     private fun viewModel(
         runtime: AgentRuntime,
-        projectFiles: ProjectFilesOwner = files()
+        projectFiles: ProjectFilesOwner = files(),
+        externalPreview: ExternalPreview = FakeExternalPreview()
     ): AgentViewModel {
         val owner = FakeOwner(runtime)
         return AgentViewModel(
@@ -281,7 +300,8 @@ class AgentViewModelTest {
             PermissionCoordinator(),
             fakeProjects(),
             FakeOneDrive(),
-            projectFiles
+            projectFiles,
+            externalPreview
         )
     }
 
@@ -403,7 +423,7 @@ class AgentViewModelTest {
     @Test
     fun `selectModel applies selection through owner and updates state`() {
         val owner = FakeOwner(null)
-        val vm = AgentViewModel(owner, runSupervisor(owner), ApprovalCoordinator(), PermissionCoordinator(), fakeProjects(), FakeOneDrive(), files())
+        val vm = AgentViewModel(owner, runSupervisor(owner), ApprovalCoordinator(), PermissionCoordinator(), fakeProjects(), FakeOneDrive(), files(), FakeExternalPreview())
         Thread.sleep(100) // state is stable once init completes
 
         vm.selectModel("deepseek", "  deepseek-chat  ")
@@ -416,7 +436,7 @@ class AgentViewModelTest {
     @Test
     fun `selectModel is rejected while running`() {
         val owner = FakeOwner(buildRuntime(HangingProvider()))
-        val vm = AgentViewModel(owner, runSupervisor(owner), ApprovalCoordinator(), PermissionCoordinator(), fakeProjects(), FakeOneDrive(), files())
+        val vm = AgentViewModel(owner, runSupervisor(owner), ApprovalCoordinator(), PermissionCoordinator(), fakeProjects(), FakeOneDrive(), files(), FakeExternalPreview())
 
         vm.send("hi")
         waitFor { vm.uiState.value.running }
@@ -430,7 +450,7 @@ class AgentViewModelTest {
     @Test
     fun `fetchModels delegates to owner with account`() = kotlinx.coroutines.runBlocking {
         val owner = FakeOwner(null)
-        val vm = AgentViewModel(owner, runSupervisor(owner), ApprovalCoordinator(), PermissionCoordinator(), fakeProjects(), FakeOneDrive(), files())
+        val vm = AgentViewModel(owner, runSupervisor(owner), ApprovalCoordinator(), PermissionCoordinator(), fakeProjects(), FakeOneDrive(), files(), FakeExternalPreview())
         val account = ProviderAccount(id = "openrouter", name = "OpenRouter", baseUrl = "https://openrouter.ai/api/v1")
 
         val result = vm.fetchModels(account)
@@ -450,7 +470,8 @@ class AgentViewModelTest {
             coordinator,
             fakeProjects(),
             FakeOneDrive(),
-            files()
+            files(),
+            FakeExternalPreview()
         )
 
         vm.ensureNotificationPermission()
@@ -554,7 +575,8 @@ class AgentViewModelTest {
             PermissionCoordinator(),
             projects,
             FakeOneDrive(),
-            LocalProjectFiles(ws, log)
+            LocalProjectFiles(ws, log),
+            FakeExternalPreview()
         )
 
         vm.send("写一份笔记")
@@ -649,6 +671,52 @@ class AgentViewModelTest {
         assertEquals("无法预览此类型", binary.notice)
 
         vm.closeFilePreview()
+        assertNull(vm.uiState.value.filePreview)
+    }
+
+    @Test
+    fun `external preview hands the page's file to the seam and leaves the page alone`() {
+        val ws = workspace()
+        ws.writeBytes(ProjectLogic.DEFAULT_PROJECT_ID, "voice.wav", byteArrayOf(0x52, 0x49, 0x00, 0x00))
+        val external = FakeExternalPreview()
+        val vm = viewModel(buildRuntime(ScriptedProvider(response("noop"))), externalPreview = external)
+
+        vm.openFilePreview("voice.wav")
+        waitFor { vm.uiState.value.filePreview != null }
+        // This app cannot render it -- which is exactly why the outside-app route exists
+        assertNull(vm.uiState.value.filePreview!!.text)
+
+        vm.openFileExternally()
+        waitFor { external.opened != null }
+        assertEquals(ProjectLogic.DEFAULT_PROJECT_ID to "voice.wav", external.opened)
+        // Handing it over changes nothing on this page: the "cannot preview" reason still stands, it is just no longer a dead end
+        assertEquals("无法预览此类型", vm.uiState.value.filePreview!!.notice)
+    }
+
+    @Test
+    fun `external preview failure is stated on the page`() {
+        val ws = workspace()
+        ws.writeBytes(ProjectLogic.DEFAULT_PROJECT_ID, "voice.wav", byteArrayOf(0x52, 0x00))
+        val external = FakeExternalPreview(ExternalPreviewException("没有能打开该文件的应用，可以先分享或导出它"))
+        val vm = viewModel(buildRuntime(ScriptedProvider(response("noop"))), externalPreview = external)
+
+        vm.openFilePreview("voice.wav")
+        waitFor { vm.uiState.value.filePreview != null }
+        vm.openFileExternally()
+
+        waitFor { vm.uiState.value.filePreview?.notice?.contains("没有能打开") == true }
+        assertEquals("没有能打开该文件的应用，可以先分享或导出它", vm.uiState.value.filePreview!!.notice)
+    }
+
+    @Test
+    fun `external preview without an open page is a no-op`() {
+        val external = FakeExternalPreview()
+        val vm = viewModel(buildRuntime(ScriptedProvider(response("noop"))), externalPreview = external)
+
+        vm.openFileExternally()
+        Thread.sleep(100)
+
+        assertNull(external.opened)
         assertNull(vm.uiState.value.filePreview)
     }
 
