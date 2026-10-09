@@ -18,6 +18,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -162,6 +163,9 @@ private fun ProviderSettings(
 ) {
     var showAddCustom by remember { mutableStateOf(false) }
 
+    var showSaveConfirmDialog by remember { mutableStateOf(false) }
+    var pendingSaveData by remember { mutableStateOf<Pair<String, String>?>(null) }
+
     SettingsScaffold(title = "服务商与密钥", onBack = onBack) {
         Text(
             text = "各服务商只需保存 API Key；模型在对话界面顶栏随时切换。",
@@ -173,7 +177,10 @@ private fun ProviderSettings(
         accounts.forEach { account ->
             ProviderKeyCard(
                 account = account,
-                onSave = { key -> onSaveKey(account.id, key) },
+                onSave = { key ->
+                    pendingSaveData = account.id to key
+                    showSaveConfirmDialog = true
+                },
                 onRemove = if (account.id.startsWith("custom")) {
                     { onRemoveCustom(account.id) }
                 } else null
@@ -195,6 +202,29 @@ private fun ProviderSettings(
                 Spacer(Modifier.size(4.dp))
                 Text("添加自定义端点", style = MaterialTheme.typography.labelMedium)
             }
+        }
+
+        if (showSaveConfirmDialog && pendingSaveData != null) {
+            AlertDialog(
+                onDismissRequest = { showSaveConfirmDialog = false },
+                confirmButton = {
+                    TextButton(onClick = {
+                        onSaveKey(pendingSaveData!!.first, pendingSaveData!!.second)
+                        showSaveConfirmDialog = false
+                    }) {
+                        Text("确定")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showSaveConfirmDialog = false }) {
+                        Text("取消")
+                    }
+                },title = {
+                    Text(text = "确认保存")
+                },text = {
+                    Text(text = "确定要保存并更新该服务商的 API Key 吗？")
+                }
+            )
         }
     }
 }

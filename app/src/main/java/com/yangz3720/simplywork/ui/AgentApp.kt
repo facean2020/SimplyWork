@@ -9,6 +9,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.tooling.preview.Preview
 import com.yangz3720.simplywork.core.session.ProjectLogic
 import com.yangz3720.simplywork.ui.agent.AgentScreen
 import com.yangz3720.simplywork.ui.agent.AgentViewModel

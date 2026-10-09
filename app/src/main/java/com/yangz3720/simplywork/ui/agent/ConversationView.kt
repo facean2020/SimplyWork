@@ -52,6 +52,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.mikepenz.markdown.compose.components.MarkdownComponent
+import com.mikepenz.markdown.compose.components.MarkdownComponents
 import kotlinx.coroutines.delay
 
 /**
@@ -231,6 +233,7 @@ private fun AssistantText(message: UiMessage) {
                     h6 = chatHeading(body, 14.sp)
                 ),
                 modifier = Modifier.fillMaxWidth()
+
             )
             Spacer(Modifier.size(2.dp))
             // Copy the whole reply (no icon dependency: material-icons-core does not include ContentCopy).
