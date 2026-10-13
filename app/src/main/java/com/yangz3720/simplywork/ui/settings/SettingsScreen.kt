@@ -223,7 +223,8 @@ private fun ProviderSettings(
                     Text(text = "确认保存")
                 },text = {
                     Text(text = "确定要保存并更新该服务商的 API Key 吗？")
-                }
+                },
+                containerColor = MaterialTheme.colorScheme.surface
             )
         }
     }
