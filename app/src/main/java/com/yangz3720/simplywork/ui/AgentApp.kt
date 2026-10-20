@@ -103,12 +103,16 @@ private fun SettingsScreenRoute(viewModel: AgentViewModel, onBack: () -> Unit) {
         autoApproveNonDestructive = state.autoApproveNonDestructive,
         contextBudget = state.contextBudget,
         contextPromptTokens = state.contextPromptTokens,
+        projects = state.projects,
+        currentProjectId = state.currentProjectId,
+        projectSouls = state.projectSouls,
         onBack = onBack,
         onSaveKey = { id, key -> viewModel.saveAccountKey(id, key) },
         onAddCustom = { name, url, key -> viewModel.addCustomAccount(name, url, key) },
         onRemoveCustom = { id -> viewModel.removeCustomAccount(id) },
         onToggleAutoApprove = { viewModel.setAutoApproveNonDestructive(it) },
-        onSetContextBudget = { viewModel.setContextBudgetOverride(it) }
+        onSetContextBudget = { viewModel.setContextBudgetOverride(it) },
+        onSaveProjectSoul = { projectId, content -> viewModel.saveProjectSoul(projectId, content) }
     )
 }
 

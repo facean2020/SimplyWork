@@ -5,6 +5,8 @@ import com.yangz3720.simplywork.core.session.SessionNode
 import com.yangz3720.simplywork.core.session.SessionNodeType
 import com.yangz3720.simplywork.core.session.SessionRepository
 import com.yangz3720.simplywork.core.session.SystemPromptKind
+import com.yangz3720.simplywork.core.workspace.AgentWorkspace
+import com.yangz3720.simplywork.core.workspace.WorkspaceAgentMd
 import com.yangz3720.simplywork.infrastructure.error.InfrastructureException
 import com.yangz3720.simplywork.infrastructure.model.model.Message
 import com.yangz3720.simplywork.infrastructure.model.model.ModelRequest
@@ -32,18 +34,22 @@ class AgentContextAssembler(
     private val repository: SessionRepository,
     private val registry: AgentToolRegistry,
     private val config: AgentConfig,
-    private val skillInjector: SkillInjector = SkillInjector.None
+    private val soul: AgentSoul,
+    private val workspace: AgentWorkspace
 ) {
 
     suspend fun assemble(sessionId: String, path: List<SessionNode>): ModelRequest {
+        val projectId = repository.getSession(sessionId)?.projectId
         val state = repository.loadState(sessionId)
         val systemText = buildString {
             append(config.systemPrompt)
-            skillInjector.promptFragment()?.takeIf { it.isNotBlank() }?.let {
-                append("\n\n")
-                append(it)
-            }
             append("\n\n")
+            if (projectId != null) {
+                soul.loadProjectSoul(projectId)
+                    ?.let { append(it).append("\n\\n") }
+                WorkspaceAgentMd.loadAgentMd(workspace.projectDir(projectId, false))
+                    ?.let { append(it).append("\n\n") }
+            }
             append(state.toPromptBlock())
         }
 

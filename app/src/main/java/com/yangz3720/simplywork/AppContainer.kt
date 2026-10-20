@@ -24,6 +24,7 @@ import com.yangz3720.simplywork.core.workspace.JsonFileChangeLog
 import com.yangz3720.simplywork.core.workspace.LocalProjectFiles
 import com.yangz3720.simplywork.core.workspace.ProjectFilesOwner
 import com.yangz3720.simplywork.KeyringState
+import com.yangz3720.simplywork.core.agent.AgentSoul
 import com.yangz3720.simplywork.infrastructure.cloud.onedrive.OneDriveService
 import com.yangz3720.simplywork.infrastructure.model.ModelProvider
 import com.yangz3720.simplywork.infrastructure.model.client.OpenAiCompatibleClient
@@ -245,6 +246,8 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
         )
     }
 
+    private val soul = AgentSoul(File(appContext.filesDir, "agent_workspace"))
+
     init {
         runtime = KeyringLogic.toModelConfig(keyring.state)?.let(::buildRuntime)
     }
@@ -307,6 +310,12 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
         mutateKeyring { KeyringLogic.withContextBudgetOverride(it, tokens) }
         // The budget goes into AgentConfig (compaction trigger + working window), so it likewise only takes effect after a rebuild.
         rebuildRuntime()
+    }
+
+    override fun loadProjectSoul(projectId: String): String = soul.loadProjectSoul(projectId).orEmpty()
+
+    override fun saveProjectSoul(projectId: String, content: String) {
+        soul.updateSoul(projectId, content)
     }
 
     /**
@@ -402,7 +411,9 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
                     changes = changeLog
                 ) + ScriptTools.registeredTools(scriptJobs) +
                     TtsTool.registeredTool(appContext, workspace, projectStore)
-            }
+            },
+            soul = soul,
+            workspace = workspace
         )
 
     /**

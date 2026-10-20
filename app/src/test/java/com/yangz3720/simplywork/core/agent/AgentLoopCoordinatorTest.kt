@@ -6,6 +6,7 @@ import com.yangz3720.simplywork.core.session.SessionNodeType
 import com.yangz3720.simplywork.core.session.TodoStatus
 import com.yangz3720.simplywork.core.session.store.InMemoryPayloadStore
 import com.yangz3720.simplywork.core.session.store.InMemorySessionStore
+import com.yangz3720.simplywork.core.workspace.AgentWorkspace
 import com.yangz3720.simplywork.infrastructure.model.ModelProvider
 import com.yangz3720.simplywork.infrastructure.model.config.ModelCapability
 import com.yangz3720.simplywork.infrastructure.model.model.FinishReason
@@ -26,6 +27,7 @@ import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 
 /**
  * End-to-end loop tests over the real AgentRuntime wiring (in-memory stores +
@@ -70,7 +72,9 @@ class AgentLoopCoordinatorTest {
             provider = provider,
             router = mockk<SystemOperationRouter>(relaxed = true),
             config = config,
-            summarizer = TruncateSummarizer()
+            summarizer = TruncateSummarizer(),
+            workspace = AgentWorkspace(File("build/test-agent-loop/workspace")),
+            soul = AgentSoul(File("build/test-agent-loop/souls"))
         )
 
     @Test
