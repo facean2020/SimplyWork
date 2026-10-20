@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -19,6 +20,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -41,12 +43,16 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.mikepenz.markdown.m3.Markdown
+import com.mikepenz.markdown.m3.markdownColor
+import com.mikepenz.markdown.m3.markdownTypography
 import com.yangz3720.simplywork.core.agent.ContextBudgetPlan
+import com.yangz3720.simplywork.core.session.Project
 import com.yangz3720.simplywork.infrastructure.model.config.ProviderAccount
 import kotlin.math.roundToInt
 
 /** Paging inside settings: the first screen is the index, and each concrete setting goes one level deeper. */
-private enum class SettingsPage { Index, Providers, Context }
+private enum class SettingsPage { Index, Providers, Context, Souls }
 
 /**
  * Settings (v1.1).
@@ -64,12 +70,16 @@ fun SettingsScreen(
     autoApproveNonDestructive: Boolean,
     contextBudget: ContextBudgetPlan?,
     contextPromptTokens: Int,
+    projects: List<Project>,
+    currentProjectId: String,
+    projectSouls: Map<String, String>,
     onBack: () -> Unit,
     onSaveKey: (accountId: String, apiKey: String) -> Unit,
     onAddCustom: (name: String, baseUrl: String, apiKey: String) -> Unit,
     onRemoveCustom: (accountId: String) -> Unit,
     onToggleAutoApprove: (Boolean) -> Unit,
-    onSetContextBudget: (Int?) -> Unit
+    onSetContextBudget: (Int?) -> Unit,
+    onSaveProjectSoul: (projectId: String, content: String) -> Unit
 ) {
     var page by remember { mutableStateOf(SettingsPage.Index) }
     BackHandler { if (page == SettingsPage.Index) onBack() else page = SettingsPage.Index }
@@ -82,6 +92,7 @@ fun SettingsScreen(
             contextPromptTokens = contextPromptTokens,
             onOpenProviders = { page = SettingsPage.Providers },
             onOpenContext = { page = SettingsPage.Context },
+            onOpenSouls = { page = SettingsPage.Souls },
             onToggleAutoApprove = onToggleAutoApprove,
             onBack = onBack
         )
@@ -100,6 +111,14 @@ fun SettingsScreen(
             onBack = { page = SettingsPage.Index },
             onSetBudget = onSetContextBudget
         )
+
+        SettingsPage.Souls -> SoulSettings(
+            projects = projects,
+            currentProjectId = currentProjectId,
+            souls = projectSouls,
+            onBack = { page = SettingsPage.Index },
+            onSave = onSaveProjectSoul
+        )
     }
 }
 
@@ -113,6 +132,7 @@ private fun SettingsIndex(
     contextPromptTokens: Int,
     onOpenProviders: () -> Unit,
     onOpenContext: () -> Unit,
+    onOpenSouls: () -> Unit,
     onToggleAutoApprove: (Boolean) -> Unit,
     onBack: () -> Unit
 ) {
@@ -130,6 +150,11 @@ private fun SettingsIndex(
                     usedPercent(contextPromptTokens, budget.tokens).orEmpty()
             } ?: "未选择模型",
             onClick = onOpenContext
+        )
+        SettingsEntry(
+            title = "项目 Soul",
+            subtitle = "为每个项目编辑 Markdown Soul",
+            onClick = onOpenSouls
         )
         // Auto-approval is a two-way choice, so an inline switch is faster than another level -- and the index page shows the current state at a glance.
         Row(
@@ -226,6 +251,99 @@ private fun ProviderSettings(
                 },
                 containerColor = MaterialTheme.colorScheme.surface
             )
+        }
+    }
+}
+
+/**
+ * Project Soul editor.
+ *
+ * Each project owns one Markdown file. Keeping project selection and editing on this second-level
+ * page makes the setting discoverable without introducing a third navigation level.
+ */
+@Composable
+private fun SoulSettings(
+    projects: List<Project>,
+    currentProjectId: String,
+    souls: Map<String, String>,
+    onBack: () -> Unit,
+    onSave: (projectId: String, content: String) -> Unit
+) {
+    var selectedProjectId by remember(projects, currentProjectId) {
+        mutableStateOf(projects.firstOrNull { it.id == currentProjectId }?.id ?: projects.firstOrNull()?.id)
+    }
+    val selectedProject = projects.firstOrNull { it.id == selectedProjectId }
+    val savedSoul = selectedProjectId?.let(souls::get).orEmpty()
+    var draft by remember(selectedProjectId, savedSoul) { mutableStateOf(savedSoul) }
+    var preview by remember(selectedProjectId) { mutableStateOf(false) }
+
+    SettingsScaffold(title = "项目 Soul", onBack = onBack) {
+        Text(
+            text = "Soul 会作为该项目每次对话的系统上下文。使用 Markdown 记录角色、偏好和长期规则。",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.size(14.dp))
+
+        Text("选择项目", style = MaterialTheme.typography.titleSmall)
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 8.dp)) {
+            projects.forEach { project ->
+                FilterChip(
+                    selected = project.id == selectedProjectId,
+                    onClick = { selectedProjectId = project.id },
+                    label = { Text(project.name) }
+                )
+            }
+        }
+        Spacer(Modifier.size(16.dp))
+
+        if (selectedProject == null) {
+            Text(
+                text = "还没有可配置的项目。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            return@SettingsScaffold
+        }
+
+        Text("${selectedProject.name} 的 soul.md", style = MaterialTheme.typography.titleSmall)
+        Row(modifier = Modifier.padding(top = 4.dp)) {
+            TextButton(onClick = { preview = false }) { Text("编辑") }
+            TextButton(onClick = { preview = true }) { Text("预览") }
+        }
+
+        if (preview) {
+            if (draft.isBlank()) {
+                Text(
+                    text = "这个项目还没有 Soul。切到“编辑”开始编写。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                Markdown(
+                    content = draft,
+                    colors = markdownColor(text = MaterialTheme.colorScheme.onBackground),
+                    typography = markdownTypography(text = MaterialTheme.typography.bodyMedium),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        } else {
+            OutlinedTextField(
+                value = draft,
+                onValueChange = { draft = it },
+                modifier = Modifier.fillMaxWidth().heightIn(min = 260.dp),
+                label = { Text("Markdown") },
+                minLines = 12,
+                maxLines = 24
+            )
+        }
+
+        TextButton(
+            onClick = { onSave(selectedProject.id, draft) },
+            enabled = draft != savedSoul,
+            modifier = Modifier.padding(top = 8.dp)
+        ) {
+            Text("保存 Soul")
         }
     }
 }

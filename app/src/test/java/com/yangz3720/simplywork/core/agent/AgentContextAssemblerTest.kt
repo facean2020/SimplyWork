@@ -11,6 +11,7 @@ import com.yangz3720.simplywork.core.session.TodoItem
 import com.yangz3720.simplywork.core.session.TodoStatus
 import com.yangz3720.simplywork.core.session.store.InMemoryPayloadStore
 import com.yangz3720.simplywork.core.session.store.InMemorySessionStore
+import com.yangz3720.simplywork.core.workspace.AgentWorkspace
 import com.yangz3720.simplywork.infrastructure.model.model.Message
 import com.yangz3720.simplywork.infrastructure.model.model.ToolDefinition
 import com.yangz3720.simplywork.infrastructure.systemops.model.DangerLevel
@@ -22,6 +23,7 @@ import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 
 class AgentContextAssemblerTest {
 
@@ -37,7 +39,13 @@ class AgentContextAssemblerTest {
         )
     }
     private val config = AgentConfig(systemPrompt = "BASE-PROMPT")
-    private val assembler = AgentContextAssembler(repository, registry, config)
+    private val assembler = AgentContextAssembler(
+        repository,
+        registry,
+        config,
+        AgentSoul(File("build/test-agent-context/souls")),
+        AgentWorkspace(File("build/test-agent-context/workspace"))
+    )
 
     private suspend fun appendNode(sessionId: String, parentId: String?, type: SessionNodeType, payload: String): SessionNode =
         repository.appendNode(sessionId, parentId, type, Json.parseToJsonElement(payload) as JsonObject, 1, SessionNodeStatus.success)
