@@ -1,5 +1,6 @@
 package com.yangz3720.simplywork.core.workspace
 
+import com.yangz3720.simplywork.core.session.Project
 import java.io.File
 
 /**
@@ -23,10 +24,12 @@ class AgentWorkspace(private val root: File) {
     /** Per-listing entry cap (stops a huge directory being fed to the model as one full table). */
     var maxListEntries: Int = 500
 
-    /** Root directory of each project (created automatically). */
-    fun projectDir(projectId: String): File {
+    /** Root directory of each project. */
+    fun projectDir(projectId: String, isCreateDir: Boolean = true): File {
         require(ProjectIdRegex.matches(projectId)) { "invalid project id: '$projectId'" }
-        return File(root, projectId).apply { mkdirs() }
+        return File(root, projectId).apply {
+            if (isCreateDir) mkdirs()
+        }
     }
 
     /**

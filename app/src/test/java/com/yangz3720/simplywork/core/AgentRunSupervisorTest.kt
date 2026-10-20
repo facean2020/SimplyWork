@@ -1,7 +1,9 @@
 package com.yangz3720.simplywork.core
 
 import com.yangz3720.simplywork.core.agent.AgentStepEvent
+import com.yangz3720.simplywork.core.agent.AgentSoul
 import com.yangz3720.simplywork.core.agent.IncomingMessage
+import com.yangz3720.simplywork.core.workspace.AgentWorkspace
 import com.yangz3720.simplywork.core.session.store.InMemoryPayloadStore
 import com.yangz3720.simplywork.core.session.store.InMemorySessionStore
 import com.yangz3720.simplywork.infrastructure.model.ModelProvider
@@ -14,6 +16,7 @@ import com.yangz3720.simplywork.infrastructure.model.model.TokenUsage
 import com.yangz3720.simplywork.infrastructure.systemops.SystemOperationRouter
 import io.mockk.mockk
 import java.util.concurrent.CopyOnWriteArrayList
+import java.io.File
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -66,7 +69,9 @@ class AgentRunSupervisorTest {
         structureStore = InMemorySessionStore(),
         payloadStore = InMemoryPayloadStore(),
         provider = provider,
-        router = mockk<SystemOperationRouter>(relaxed = true)
+        router = mockk<SystemOperationRouter>(relaxed = true),
+        workspace = AgentWorkspace(File("build/test-agent-runtime/workspace")),
+        soul = AgentSoul(File("build/test-agent-runtime/souls"))
     )
 
     private fun scope() = CoroutineScope(SupervisorJob() + Dispatchers.IO)

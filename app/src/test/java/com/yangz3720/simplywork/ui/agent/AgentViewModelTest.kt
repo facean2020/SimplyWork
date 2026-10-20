@@ -9,6 +9,7 @@ import com.yangz3720.simplywork.core.agent.tool.AgentSelfConfig
 import com.yangz3720.simplywork.core.agent.tool.SelfOpsTools
 import com.yangz3720.simplywork.core.agent.ContextBudget
 import com.yangz3720.simplywork.core.agent.ContextBudgetPlan
+import com.yangz3720.simplywork.core.agent.AgentSoul
 import com.yangz3720.simplywork.core.cloud.CloudFolder
 import com.yangz3720.simplywork.core.cloud.OneDriveAccount
 import com.yangz3720.simplywork.core.cloud.OneDriveOwner
@@ -98,6 +99,7 @@ class AgentViewModelTest {
         var appliedSelection: ModelSelection? = null
         var fetchedAccount: ProviderAccount? = null
         var rebuilds: Int = 0
+        val souls = mutableMapOf<String, String>()
         override val configVersion = MutableStateFlow(0)
 
         override fun current(): AgentRuntime? = runtime
@@ -113,6 +115,8 @@ class AgentViewModelTest {
         override fun contextBudget(): ContextBudgetPlan? =
             ContextBudget.resolve(contextOverride, providerContextTokens, "test-model")
         override fun setContextBudgetOverride(tokens: Int?) { contextOverride = tokens }
+        override fun loadProjectSoul(projectId: String): String = souls[projectId].orEmpty()
+        override fun saveProjectSoul(projectId: String, content: String) { souls[projectId] = content }
         override fun applySelection(providerId: String, model: String) {
             appliedSelection = ModelSelection(providerId, model)
             selection = appliedSelection
@@ -269,7 +273,9 @@ class AgentViewModelTest {
         structureStore = InMemorySessionStore(),
         payloadStore = InMemoryPayloadStore(),
         provider = provider,
-        router = mockk<SystemOperationRouter>(relaxed = true)
+        router = mockk<SystemOperationRouter>(relaxed = true),
+        workspace = workspace(),
+        soul = AgentSoul(File(tmp.root, "souls"))
     )
 
     /** Project-files seam: the real implementation + a temp directory (no mock -- directory traversal and path safety are exactly what should be verified together). */
@@ -565,7 +571,9 @@ class AgentViewModelTest {
                 response("写好了")
             ),
             router = mockk<SystemOperationRouter>(relaxed = true),
-            selfOps = { repo -> SelfOpsTools.registeredTools(repo, FakeSelfConfig(), ws, projects, log) }
+            selfOps = { repo -> SelfOpsTools.registeredTools(repo, FakeSelfConfig(), ws, projects, log) },
+            workspace = ws,
+            soul = AgentSoul(File(tmp.root, "souls"))
         )
         val owner = FakeOwner(runtime)
         val vm = AgentViewModel(

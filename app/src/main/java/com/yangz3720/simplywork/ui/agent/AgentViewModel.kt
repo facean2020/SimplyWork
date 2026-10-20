@@ -75,6 +75,12 @@ interface AgentRuntimeOwner {
     /** Settings screen (v1.1): manually set the context budget; null = fall back to automatic derivation. */
     fun setContextBudgetOverride(tokens: Int?)
 
+    /** Settings screen: read the Markdown Soul belonging to one project. */
+    fun loadProjectSoul(projectId: String): String
+
+    /** Settings screen: persist the Markdown Soul belonging to one project. */
+    fun saveProjectSoul(projectId: String, content: String)
+
     /** Fetch the endpoint's available model list for a provider account (GET /models). */
     suspend fun fetchModels(account: ProviderAccount): Result<List<String>>
 }
@@ -124,6 +130,9 @@ class AgentViewModel(
             modelConfigured = selection != null && selection.model.isNotBlank(),
             projects = projectStore.list(),
             currentProjectId = projectStore.currentId(),
+            projectSouls = projectStore.list().associate { project ->
+                project.id to owner.loadProjectSoul(project.id)
+            },
             autoApproveNonDestructive = owner.autoApproveNonDestructive(),
             contextBudget = owner.contextBudget()
         )
@@ -528,10 +537,13 @@ class AgentViewModel(
     private suspend fun refreshProjectsAndSessions() {
         val all = repository()?.listSessions().orEmpty()
         val currentProjectId = projectStore.currentId()
+        val projects = projectStore.list()
+        val souls = projects.associate { project -> project.id to owner.loadProjectSoul(project.id) }
         _uiState.update {
             it.copy(
-                projects = projectStore.list(),
+                projects = projects,
                 currentProjectId = currentProjectId,
+                projectSouls = souls,
                 sessions = sessionsFor(all, currentProjectId)
             )
         }
@@ -675,6 +687,16 @@ class AgentViewModel(
     fun setContextBudgetOverride(tokens: Int?) {
         owner.setContextBudgetOverride(tokens)
         _uiState.update { it.copy(contextBudget = owner.contextBudget()) }
+    }
+
+    /** Settings screen: write only the selected project's Soul, then reflect the saved text in UI state. */
+    fun saveProjectSoul(projectId: String, content: String) {
+        viewModelScope.launch(ioDispatcher) {
+            owner.saveProjectSoul(projectId, content)
+            _uiState.update { state ->
+                state.copy(projectSouls = state.projectSouls + (projectId to content))
+            }
+        }
     }
 
     /** Top-bar dynamic model switch: rejected while running (switching rebuilds the runtime and would interrupt the current run). */

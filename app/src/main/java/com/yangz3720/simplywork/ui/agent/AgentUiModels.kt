@@ -106,6 +106,9 @@ data class AgentUiState(
     val projects: List<Project> = emptyList(),
     val currentProjectId: String = ProjectLogic.DEFAULT_PROJECT_ID,
 
+    /** Project-scoped Markdown Souls, keyed by project id. Empty text means the project's soul.md is blank. */
+    val projectSouls: Map<String, String> = emptyMap(),
+
     /** OneDrive (v1.4): account, configuration-ready flag and sync state. */
     val oneDriveAccount: OneDriveAccount? = null,
     val oneDriveConfigured: Boolean = false,
