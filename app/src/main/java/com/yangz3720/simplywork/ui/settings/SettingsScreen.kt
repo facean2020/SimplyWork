@@ -47,7 +47,9 @@ import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
 import com.yangz3720.simplywork.core.agent.ContextBudgetPlan
+import com.yangz3720.simplywork.core.agent.PromptDocCompactor
 import com.yangz3720.simplywork.core.session.Project
+import com.yangz3720.simplywork.core.workspace.WorkspaceAgentMd
 import com.yangz3720.simplywork.infrastructure.model.config.ProviderAccount
 import kotlin.math.roundToInt
 
@@ -269,7 +271,9 @@ private fun SoulSettings(
     onBack: () -> Unit,
     onSave: (projectId: String, content: String) -> Unit
 ) {
-    var selectedProjectId by remember(projects, currentProjectId) {
+    // Keyed by the id list, not by the list instance: every refresh rebuilds `projects`, and keying on the
+    // instance would silently jump the selection back to the current project while the user is editing.
+    var selectedProjectId by remember(currentProjectId, projects.map { it.id }) {
         mutableStateOf(projects.firstOrNull { it.id == currentProjectId }?.id ?: projects.firstOrNull()?.id)
     }
     val selectedProject = projects.firstOrNull { it.id == selectedProjectId }
@@ -279,7 +283,8 @@ private fun SoulSettings(
 
     SettingsScaffold(title = "项目 Soul", onBack = onBack) {
         Text(
-            text = "Soul 会作为该项目每次对话的系统上下文。使用 Markdown 记录角色、偏好和长期规则。",
+            text = "Soul 会作为该项目每次对话的系统上下文。使用 Markdown 记录角色、偏好和长期规则。" +
+                "过长时会自动压缩，只注入前面的部分（约 ${PromptDocCompactor.DEFAULT_MAX_TOKENS} tokens 上限）。",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -338,13 +343,30 @@ private fun SoulSettings(
             )
         }
 
-        TextButton(
-            onClick = { onSave(selectedProject.id, draft) },
-            enabled = draft != savedSoul,
-            modifier = Modifier.padding(top = 8.dp)
+        Row(
+            modifier = Modifier.padding(top = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("保存 Soul")
+            TextButton(onClick = { onSave(selectedProject.id, draft) }, enabled = draft != savedSoul) {
+                Text("保存 Soul")
+            }
+            if (draft != savedSoul) {
+                Text(
+                    text = "未保存",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(start = 8.dp)
+                )
+            }
         }
+
+        Text(
+            text = "项目目录里的 AGENTS.md 也会自动作为上下文：首次加载时压缩并迁移为 " +
+                "${WorkspaceAgentMd.SNAPSHOT_NAME}，之后只读这份快照。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 12.dp)
+        )
     }
 }
 

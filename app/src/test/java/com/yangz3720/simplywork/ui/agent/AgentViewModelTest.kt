@@ -5,6 +5,10 @@ import android.app.Activity
 import android.content.SharedPreferences
 import com.yangz3720.simplywork.core.AgentRunSupervisor
 import com.yangz3720.simplywork.core.AgentRuntime
+import com.yangz3720.simplywork.core.attachment.PendingUpload
+import com.yangz3720.simplywork.core.attachment.UploadException
+import com.yangz3720.simplywork.core.attachment.UploadKind
+import com.yangz3720.simplywork.core.attachment.UploadOwner
 import com.yangz3720.simplywork.core.agent.tool.AgentSelfConfig
 import com.yangz3720.simplywork.core.agent.tool.SelfOpsTools
 import com.yangz3720.simplywork.core.agent.ContextBudget
@@ -30,10 +34,12 @@ import com.yangz3720.simplywork.core.workspace.FileChangeLog
 import com.yangz3720.simplywork.core.workspace.InMemoryFileChangeLog
 import com.yangz3720.simplywork.core.workspace.LocalProjectFiles
 import com.yangz3720.simplywork.core.workspace.ProjectFilesOwner
+import com.yangz3720.simplywork.infrastructure.model.ModelInfo
 import com.yangz3720.simplywork.infrastructure.model.ModelProvider
 import com.yangz3720.simplywork.infrastructure.model.config.ModelCapability
 import com.yangz3720.simplywork.infrastructure.model.config.ModelProviderPresets
 import com.yangz3720.simplywork.infrastructure.model.config.ProviderAccount
+import com.yangz3720.simplywork.infrastructure.model.model.Attachment
 import com.yangz3720.simplywork.infrastructure.model.model.FinishReason
 import com.yangz3720.simplywork.infrastructure.model.model.Message
 import com.yangz3720.simplywork.infrastructure.model.model.ModelRequest
@@ -98,6 +104,7 @@ class AgentViewModelTest {
         var savedKey: Pair<String, String>? = null
         var appliedSelection: ModelSelection? = null
         var fetchedAccount: ProviderAccount? = null
+        var visionSupported: Boolean = false
         var rebuilds: Int = 0
         val souls = mutableMapOf<String, String>()
         override val configVersion = MutableStateFlow(0)
@@ -117,14 +124,16 @@ class AgentViewModelTest {
         override fun setContextBudgetOverride(tokens: Int?) { contextOverride = tokens }
         override fun loadProjectSoul(projectId: String): String = souls[projectId].orEmpty()
         override fun saveProjectSoul(projectId: String, content: String) { souls[projectId] = content }
+        override fun deleteProjectSoul(projectId: String) { souls.remove(projectId) }
         override fun applySelection(providerId: String, model: String) {
             appliedSelection = ModelSelection(providerId, model)
             selection = appliedSelection
         }
-        override suspend fun fetchModels(account: ProviderAccount): Result<List<String>> {
+        override suspend fun fetchModels(account: ProviderAccount): Result<List<ModelInfo>> {
             fetchedAccount = account
-            return Result.success(listOf("m1", "m2"))
+            return Result.success(listOf(ModelInfo(id = "m1"), ModelInfo(id = "m2")))
         }
+        override fun activeModelSupportsVision(): Boolean = visionSupported
     }
 
     /**
@@ -180,6 +189,22 @@ class AgentViewModelTest {
         override suspend fun open(projectId: String, path: String): Result<Unit> {
             opened = projectId to path
             return if (failure == null) Result.success(Unit) else Result.failure(failure)
+        }
+    }
+
+    /**
+     * Upload seam stand-in (v1.8): the interesting half is what the ViewModel does with a loaded upload
+     * (staging, sending, clearing), so the fake answers with whatever the case pre-arranged -- success or a
+     * rejection with a user-facing reason.
+     */
+    private class FakeUploads(
+        var next: Result<PendingUpload> = Result.failure(UploadException("未安排上传结果"))
+    ) : UploadOwner {
+        var requested: String? = null
+
+        override suspend fun load(uri: String, name: String?): Result<PendingUpload> {
+            requested = uri
+            return next
         }
     }
 
@@ -296,7 +321,8 @@ class AgentViewModelTest {
     private fun viewModel(
         runtime: AgentRuntime,
         projectFiles: ProjectFilesOwner = files(),
-        externalPreview: ExternalPreview = FakeExternalPreview()
+        externalPreview: ExternalPreview = FakeExternalPreview(),
+        uploads: UploadOwner = FakeUploads()
     ): AgentViewModel {
         val owner = FakeOwner(runtime)
         return AgentViewModel(
@@ -307,7 +333,8 @@ class AgentViewModelTest {
             fakeProjects(),
             FakeOneDrive(),
             projectFiles,
-            externalPreview
+            externalPreview,
+            uploads
         )
     }
 
@@ -429,7 +456,7 @@ class AgentViewModelTest {
     @Test
     fun `selectModel applies selection through owner and updates state`() {
         val owner = FakeOwner(null)
-        val vm = AgentViewModel(owner, runSupervisor(owner), ApprovalCoordinator(), PermissionCoordinator(), fakeProjects(), FakeOneDrive(), files(), FakeExternalPreview())
+        val vm = AgentViewModel(owner, runSupervisor(owner), ApprovalCoordinator(), PermissionCoordinator(), fakeProjects(), FakeOneDrive(), files(), FakeExternalPreview(), FakeUploads())
         Thread.sleep(100) // state is stable once init completes
 
         vm.selectModel("deepseek", "  deepseek-chat  ")
@@ -442,7 +469,7 @@ class AgentViewModelTest {
     @Test
     fun `selectModel is rejected while running`() {
         val owner = FakeOwner(buildRuntime(HangingProvider()))
-        val vm = AgentViewModel(owner, runSupervisor(owner), ApprovalCoordinator(), PermissionCoordinator(), fakeProjects(), FakeOneDrive(), files(), FakeExternalPreview())
+        val vm = AgentViewModel(owner, runSupervisor(owner), ApprovalCoordinator(), PermissionCoordinator(), fakeProjects(), FakeOneDrive(), files(), FakeExternalPreview(), FakeUploads())
 
         vm.send("hi")
         waitFor { vm.uiState.value.running }
@@ -454,15 +481,86 @@ class AgentViewModelTest {
     }
 
     @Test
+    fun `an attached document rides along with the next send and is cleared`() {
+        val uploads = FakeUploads(
+            Result.success(PendingUpload(id = "u1", name = "notes.md", kind = UploadKind.Document, text = "# 标题"))
+        )
+        val vm = viewModel(buildRuntime(ScriptedProvider(response("收到"))), uploads = uploads)
+
+        vm.attachUpload("content://doc/1")
+        waitFor { vm.uiState.value.pendingUploads.size == 1 }
+        assertEquals("content://doc/1", uploads.requested)
+
+        vm.send("帮我总结这篇笔记")
+        waitFor { !vm.uiState.value.running && vm.uiState.value.messages.size == 2 }
+
+        val user = vm.uiState.value.messages.first()
+        assertEquals("帮我总结这篇笔记", user.text)
+        assertEquals(listOf(UiAttachment(name = "notes.md", image = false)), user.attachments)
+        // Cleared at hand-off: a chip left behind would be attached again on the next message.
+        assertTrue(vm.uiState.value.pendingUploads.isEmpty())
+    }
+
+    @Test
+    fun `an upload-only turn is a valid message and names the session after the file`() {
+        val image = Attachment.Image(mimeType = "image/webp", base64Data = "AAAA", name = "cat.jpg")
+        val uploads = FakeUploads(
+            Result.success(PendingUpload(id = "u1", name = "cat.jpg", kind = UploadKind.Image, image = image))
+        )
+        val vm = viewModel(buildRuntime(ScriptedProvider(response("这是一只猫"))), uploads = uploads)
+
+        vm.attachUpload("content://img/1")
+        waitFor { vm.uiState.value.pendingUploads.size == 1 }
+        vm.send("")
+        waitFor { !vm.uiState.value.running && vm.uiState.value.messages.size == 2 }
+
+        val user = vm.uiState.value.messages.first()
+        assertEquals("", user.text)
+        // The transcript shows the file, not its base64: the payload stays in the session store.
+        assertEquals(UiAttachment(name = "cat.jpg", image = true), user.attachments.single())
+        assertEquals("cat.jpg", vm.uiState.value.currentTitle)
+    }
+
+    @Test
+    fun `a rejected pick surfaces the reason and stages nothing`() {
+        val uploads = FakeUploads(
+            Result.failure(UploadException("暂不支持「a.pdf」这种格式，目前支持图片和 txt / md 文档"))
+        )
+        val vm = viewModel(buildRuntime(ScriptedProvider(response("ok"))), uploads = uploads)
+
+        vm.attachUpload("content://doc/pdf")
+        waitFor { vm.uiState.value.uploadError != null }
+
+        assertTrue(vm.uiState.value.uploadError!!.contains("暂不支持"))
+        assertTrue(vm.uiState.value.pendingUploads.isEmpty())
+        assertFalse(vm.uiState.value.uploadBusy)
+    }
+
+    @Test
+    fun `removing a chip drops it before sending`() {
+        val uploads = FakeUploads(
+            Result.success(PendingUpload(id = "u1", name = "notes.md", kind = UploadKind.Document, text = "x"))
+        )
+        val vm = viewModel(buildRuntime(ScriptedProvider(response("ok"))), uploads = uploads)
+
+        vm.attachUpload("content://doc/1")
+        waitFor { vm.uiState.value.pendingUploads.size == 1 }
+        vm.removeUpload("u1")
+
+        assertTrue(vm.uiState.value.pendingUploads.isEmpty())
+    }
+
+    @Test
     fun `fetchModels delegates to owner with account`() = kotlinx.coroutines.runBlocking {
         val owner = FakeOwner(null)
-        val vm = AgentViewModel(owner, runSupervisor(owner), ApprovalCoordinator(), PermissionCoordinator(), fakeProjects(), FakeOneDrive(), files(), FakeExternalPreview())
+        val vm = AgentViewModel(owner, runSupervisor(owner), ApprovalCoordinator(), PermissionCoordinator(), fakeProjects(), FakeOneDrive(), files(), FakeExternalPreview(), FakeUploads())
         val account = ProviderAccount(id = "openrouter", name = "OpenRouter", baseUrl = "https://openrouter.ai/api/v1")
 
         val result = vm.fetchModels(account)
 
         assertEquals(account, owner.fetchedAccount)
-        assertEquals(listOf("m1", "m2"), result.getOrThrow())
+        // The catalogue (not bare ids) crosses this boundary now: the selector shows context/price from it.
+        assertEquals(listOf("m1", "m2"), result.getOrThrow().map { it.id })
     }
 
     @Test
@@ -477,7 +575,8 @@ class AgentViewModelTest {
             fakeProjects(),
             FakeOneDrive(),
             files(),
-            FakeExternalPreview()
+            FakeExternalPreview(),
+            FakeUploads()
         )
 
         vm.ensureNotificationPermission()
@@ -584,7 +683,8 @@ class AgentViewModelTest {
             projects,
             FakeOneDrive(),
             LocalProjectFiles(ws, log),
-            FakeExternalPreview()
+            FakeExternalPreview(),
+            FakeUploads()
         )
 
         vm.send("写一份笔记")
@@ -775,7 +875,19 @@ class AgentViewModelTest {
     @Test
     fun `deleteProject clears its sessions, sandbox files and returns to the default project`() {
         val runtime = buildRuntime(ScriptedProvider(response("done")))
-        val vm = viewModel(runtime)
+        // The owner is kept in hand: the Soul lives outside the sandbox, so "the directory is gone" is not enough.
+        val owner = FakeOwner(runtime)
+        val vm = AgentViewModel(
+            owner,
+            runSupervisor(owner),
+            ApprovalCoordinator(),
+            PermissionCoordinator(),
+            fakeProjects(),
+            FakeOneDrive(),
+            files(),
+            FakeExternalPreview(),
+            FakeUploads()
+        )
 
         vm.createProject("临时项目")
         waitFor { vm.uiState.value.projects.any { it.name == "临时项目" } }
@@ -783,6 +895,7 @@ class AgentViewModelTest {
 
         vm.switchProject(projectId)
         waitFor { vm.uiState.value.currentProjectId == projectId }
+        owner.souls[projectId] = "# 临时项目的 Soul"
 
         // Put a file in the sandbox and confirm it disappears along with the project (rather than being left behind as an orphan directory)
         val note = File(tmp.root, "ws/$projectId/note.md")
@@ -801,6 +914,7 @@ class AgentViewModelTest {
         waitFor { vm.uiState.value.projects.none { it.id == projectId } }
         assertTrue(runtime.repository.listSessions().none { it.id in sessionIds })
         assertFalse(note.exists())
+        assertFalse(owner.souls.containsKey(projectId))
         assertEquals(ProjectLogic.DEFAULT_PROJECT_ID, vm.uiState.value.currentProjectId)
         assertNull(vm.uiState.value.currentSessionId)
     }
@@ -832,7 +946,7 @@ class AgentViewModelTest {
         runtime.repository.createSession("B 的对话", b.id)
 
         val owner = FakeOwner(runtime)
-        val vm = AgentViewModel(owner, runSupervisor(owner), ApprovalCoordinator(), PermissionCoordinator(), projects, FakeOneDrive(), files(), FakeExternalPreview())
+        val vm = AgentViewModel(owner, runSupervisor(owner), ApprovalCoordinator(), PermissionCoordinator(), projects, FakeOneDrive(), files(), FakeExternalPreview(), FakeUploads())
         Thread.sleep(100) // init: the default project is current and owns no session
 
         // Switching has to re-filter for the project we just entered. Filtering by the id the projection still

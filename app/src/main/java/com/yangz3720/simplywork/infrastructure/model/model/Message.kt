@@ -59,10 +59,25 @@ sealed interface Message {
 @Serializable
 sealed interface Attachment {
 
+    /** An uploaded image. [name] is the original file name -- kept for the transcript, never sent to the provider. */
     @Serializable
     @SerialName("image")
     data class Image(
         val mimeType: String,
-        val base64Data: String
+        val base64Data: String,
+        val name: String? = null
+    ) : Attachment
+
+    /**
+     * An uploaded document whose text was already extracted (v1.8): sent to the model as an extra text part, so a
+     * format (pdf/word later) only has to produce [text] -- the request format never changes.
+     */
+    @Serializable
+    @SerialName("document")
+    data class Document(
+        val name: String,
+        val text: String,
+        /** The source was longer than the extractor's cap and only its head is here. */
+        val truncated: Boolean = false
     ) : Attachment
 }

@@ -1,5 +1,6 @@
 package com.yangz3720.simplywork.ui.agent
 
+import com.yangz3720.simplywork.core.attachment.PendingUpload
 import com.yangz3720.simplywork.core.cloud.CloudFolder
 import com.yangz3720.simplywork.core.cloud.OneDriveAccount
 import com.yangz3720.simplywork.core.cloud.SyncState
@@ -39,7 +40,25 @@ data class UiMessage(
      * v1.5: what this tool call did to workspace files (fs_write/fs_move/fs_delete).
      * Attached by [ConversationRenderer] keyed by toolCallId, rendered under the tool entry as a diff card.
      */
-    val fileChange: FileChange? = null
+    val fileChange: FileChange? = null,
+
+    /**
+     * v1.8: uploads that belonged to this user turn (images / extracted documents).
+     * Rendered as chips inside the bubble, so a document is one line rather than 40k characters of transcript.
+     * A display projection only -- see [UiAttachment].
+     */
+    val attachments: List<UiAttachment> = emptyList()
+)
+
+/**
+ * One user upload as the conversation shows it: name + kind. The base64 payload and the document text stay in
+ * the session store -- putting them into Compose state would keep every uploaded image alive for the whole
+ * session just to draw a one-line chip.
+ */
+data class UiAttachment(
+    val name: String,
+    val image: Boolean,
+    val truncated: Boolean = false
 )
 
 enum class UiMessageKind {
@@ -138,6 +157,19 @@ data class AgentUiState(
      * v1.1: auto-approve non-destructive calls (a user toggle). Destructive calls are unaffected by it and always prompt.
      */
     val autoApproveNonDestructive: Boolean = true,
+
+    /** v1.8: uploads picked but not sent yet -- the chips above the input bar. */
+    val pendingUploads: List<PendingUpload> = emptyList(),
+    /** v1.8: a picked file is being read / decoded right now. */
+    val uploadBusy: Boolean = false,
+    /** v1.8: why the last pick was rejected (unsupported format / unreadable), shown next to the chips. */
+    val uploadError: String? = null,
+
+    /**
+     * v1.9: whether the selected model accepts image input. Gates the "图片" entry in the attach sheet -- offering it
+     * for a text-only model only leads to a rejected request after the user has already picked a file.
+     */
+    val activeModelSupportsVision: Boolean = false,
 
     /**
      * v1.1: the current model's context budget + where it came from (the settings page shows it faithfully, see `ContextBudgetPlan`).

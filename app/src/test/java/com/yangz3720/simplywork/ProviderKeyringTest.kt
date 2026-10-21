@@ -1,5 +1,6 @@
 package com.yangz3720.simplywork
 
+import com.yangz3720.simplywork.infrastructure.model.ModelInfo
 import com.yangz3720.simplywork.infrastructure.model.config.ModelProviderPresets
 import com.yangz3720.simplywork.infrastructure.model.config.ProviderAccount
 import org.junit.Assert.assertEquals
@@ -145,5 +146,50 @@ class KeyringLogicTest {
 
         val mixed = KeyringLogic.withModelContexts(state, mapOf("x/ok" to 128_000, "x/bad" to 0))
         assertEquals(mapOf("x/ok" to 128_000), mixed.modelContextTokens)
+    }
+
+    // ----- withModelCatalog (v1.9: context + vision from one /models response) -----
+
+    @Test
+    fun `withModelCatalog records context and vision in one pass`() {
+        val catalog = listOf(
+            ModelInfo(id = "vision-model", contextTokens = 128_000, supportsVision = true),
+            ModelInfo(id = "text-model", contextTokens = null, supportsVision = false)
+        )
+
+        val state = KeyringLogic.withModelCatalog(KeyringState(), "openrouter", catalog)
+
+        // context: only models that actually reported a length are recorded
+        assertEquals(mapOf("openrouter/vision-model" to 128_000), state.modelContextTokens)
+        // vision: every model gets an entry, because "false" is a real answer (text-only) and not "unknown"
+        assertEquals(
+            mapOf("openrouter/vision-model" to true, "openrouter/text-model" to false),
+            state.modelVision
+        )
+    }
+
+    @Test
+    fun `withModelCatalog merges with what was already learned and no-ops on an empty list`() {
+        val first = KeyringLogic.withModelCatalog(
+            KeyringState(),
+            "openrouter",
+            listOf(ModelInfo(id = "a", contextTokens = 100, supportsVision = true))
+        )
+        val second = KeyringLogic.withModelCatalog(
+            first,
+            "deepseek",
+            listOf(ModelInfo(id = "b", contextTokens = 200, supportsVision = false))
+        )
+
+        assertEquals(
+            mapOf("openrouter/a" to 100, "deepseek/b" to 200),
+            second.modelContextTokens
+        )
+        assertEquals(
+            mapOf("openrouter/a" to true, "deepseek/b" to false),
+            second.modelVision
+        )
+        // an empty catalogue must not touch state at all (no pointless persist / runtime rebuild)
+        assertTrue(KeyringLogic.withModelCatalog(second, "qwen", emptyList()) === second)
     }
 }

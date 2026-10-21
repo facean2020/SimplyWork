@@ -103,7 +103,7 @@ class AgentRuntime private constructor(
                 maxToolResultChars = config.maxToolResultChars,
                 autoApproveNonDestructive = config.autoApproveNonDestructive
             )
-            val assembler = AgentContextAssembler(repository, registry, config, soul, workspace)
+            val assembler = AgentContextAssembler(repository, registry, config, soul, workspace, estimator)
             val compactor = ContextCompactor(repository, summarizer, estimator, config)
             val coordinator = AgentLoopCoordinator(
                 repository = repository,

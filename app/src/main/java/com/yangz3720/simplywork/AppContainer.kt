@@ -15,6 +15,7 @@ import com.yangz3720.simplywork.core.agent.tool.AgentSelfConfig
 import com.yangz3720.simplywork.core.agent.tool.ScriptTools
 import com.yangz3720.simplywork.core.agent.tool.SelfOpsTools
 import com.yangz3720.simplywork.core.agent.tool.TtsTool
+import com.yangz3720.simplywork.core.attachment.UploadOwner
 import com.yangz3720.simplywork.core.cloud.OneDriveOwner
 import com.yangz3720.simplywork.core.session.ProjectStore
 import com.yangz3720.simplywork.core.workspace.AgentWorkspace
@@ -26,10 +27,13 @@ import com.yangz3720.simplywork.core.workspace.ProjectFilesOwner
 import com.yangz3720.simplywork.KeyringState
 import com.yangz3720.simplywork.core.agent.AgentSoul
 import com.yangz3720.simplywork.infrastructure.cloud.onedrive.OneDriveService
+import com.yangz3720.simplywork.infrastructure.model.ModelInfo
 import com.yangz3720.simplywork.infrastructure.model.ModelProvider
+import com.yangz3720.simplywork.infrastructure.model.ModelVisionTable
 import com.yangz3720.simplywork.infrastructure.model.client.OpenAiCompatibleClient
 import com.yangz3720.simplywork.infrastructure.model.config.ModelConfig
 import com.yangz3720.simplywork.infrastructure.model.config.ProviderAccount
+import com.yangz3720.simplywork.infrastructure.media.AndroidUploadLoader
 import com.yangz3720.simplywork.infrastructure.preview.AndroidExternalPreview
 import com.yangz3720.simplywork.infrastructure.sandbox.engine.QuickJsSandbox
 import com.yangz3720.simplywork.infrastructure.systemops.SystemCapabilityProbeImpl
@@ -105,6 +109,12 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
      * and path safety stays in one place (the UI never resolves a sandbox path itself).
      */
     val externalPreview: ExternalPreview by lazy { AndroidExternalPreview(appContext, workspace) }
+
+    /**
+     * Upload seam (v1.8): picked image / document → what the model can read. Resolves `content://` URIs and
+     * dispatches documents through the extractor factory (txt/md today, pdf/word as new providers).
+     */
+    val uploads: UploadOwner by lazy { AndroidUploadLoader(appContext) }
 
     /**
      * OneDrive integration (v1.4): lazy wiring -- no network or MSAL initialization, only object
@@ -318,16 +328,21 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
         soul.updateSoul(projectId, content)
     }
 
+    override fun deleteProjectSoul(projectId: String) {
+        soul.deleteSoul(projectId)
+    }
+
     /**
-     * Fetches the model list (GET /models) for a provider account. A one-off throwaway client + IO thread +
+     * Fetches the model catalogue (GET /models) for a provider account. A one-off throwaway client + IO thread +
      * Throwable fallback: for non-IOException OkHttp rethrows as-is to the thread pool after the callback
      * (a process-level FATAL), so everything here is folded into Result (except cancellation).
      *
-     * v1.1: incidentally records the **context length** reported by the provider. The model list is fetched
-     * for the selector anyway, so learning it costs no extra request -- and the context budget needs it
-     * (see [contextBudgetPlan]).
+     * Returns the full [ModelInfo] entries rather than bare ids: the selector shows the context length and price
+     * the endpoint reported, and the attach button needs the vision capability. Side effect: the context and
+     * vision maps are recorded, so the chat screen knows both without a second request
+     * (see [contextBudgetPlan] and [activeModelSupportsVision]).
      */
-    override suspend fun fetchModels(account: ProviderAccount): Result<List<String>> =
+    override suspend fun fetchModels(account: ProviderAccount): Result<List<ModelInfo>> =
         withContext(Dispatchers.IO) {
             val client = OpenAiCompatibleClient(
                 ModelConfig(
@@ -341,17 +356,9 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
                 client.listModelCatalog()
                     .onSuccess { catalog ->
                         mutateKeyring { state ->
-                            KeyringLogic.withModelContexts(
-                                state,
-                                catalog.mapNotNull { info ->
-                                    info.contextTokens?.let {
-                                        KeyringLogic.contextKey(account.id, info.id) to it
-                                    }
-                                }.toMap()
-                            )
+                            KeyringLogic.withModelCatalog(state, account.id, catalog)
                         }
                     }
-                    .map { catalog -> catalog.map { it.id } }
             } catch (e: CancellationException) {
                 throw e
             } catch (t: Throwable) {
@@ -447,8 +454,23 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
         )
     }
 
-    private fun createProvider(config: ModelConfig): ModelProvider = OpenAiCompatibleClient(config)
+    /**
+     * Whether the currently selected model accepts image input -- what the attach button is gated on.
+     *
+     * Read order: what `/models` reported for this exact provider+model (recorded by [fetchModels]) >
+     * [ModelVisionTable]'s built-in list > `false`. The table rung matters when the user selected a model without
+     * ever opening the picker (the selection is persisted across launches), and `false` is the deliberate
+     * fallback: hiding a button is recoverable, a request rejected after the user already picked a file is not.
+     */
+    override fun activeModelSupportsVision(): Boolean {
+        val state = keyring.state
+        val accountId = state.activeId ?: return false
+        if (state.activeModel.isBlank()) return false
+        return state.modelVision[KeyringLogic.contextKey(accountId, state.activeModel)]
+            ?: ModelVisionTable.supports(state.activeModel)
+    }
 
+    private fun createProvider(config: ModelConfig): ModelProvider = OpenAiCompatibleClient(config)
     private companion object {
         const val PREFS_NAME = "simplywork"
 

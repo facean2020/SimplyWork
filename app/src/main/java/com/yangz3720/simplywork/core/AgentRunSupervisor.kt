@@ -2,6 +2,7 @@ package com.yangz3720.simplywork.core
 
 import com.yangz3720.simplywork.core.agent.AgentStepEvent
 import com.yangz3720.simplywork.core.agent.IncomingMessage
+import com.yangz3720.simplywork.infrastructure.model.model.Attachment
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -77,8 +78,14 @@ class AgentRunSupervisor(
      * Single-task assumption (equivalent to the old `runJob?.cancel()`): when a run is already
      * going, cancel it first and then start the new one. A no-op when the model is unconfigured
      * ([runtime] is null); the caller owns showing the "not configured" message.
+     *
+     * [attachments] (v1.8) go with [initialPrompt]: uploaded images / extracted document text.
      */
-    fun start(sessionId: String, initialPrompt: String?) {
+    fun start(
+        sessionId: String,
+        initialPrompt: String?,
+        attachments: List<Attachment> = emptyList()
+    ) {
         val runtime = runtime() ?: return
         cancelCurrent()
         val token = ++generation
@@ -89,7 +96,7 @@ class AgentRunSupervisor(
         onRunStarted(sessionId)
         job = scope.launch(dispatcher) {
             try {
-                runtime.coordinator.run(sessionId, initialPrompt).collect { event -> dispatch(event) }
+                runtime.coordinator.run(sessionId, initialPrompt, attachments).collect { event -> dispatch(event) }
                 finish(token)
             } catch (e: CancellationException) {
                 finish(token)

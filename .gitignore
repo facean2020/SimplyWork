@@ -15,6 +15,7 @@ build/
 local.properties
 .mimocode
 .kotlin/
+devDir
 
 # Release signing keystore: contains a private key — never commit (password is in local.properties, also ignored).
 # Losing it means you can no longer upgrade the same app over-the-air — back it up separately.

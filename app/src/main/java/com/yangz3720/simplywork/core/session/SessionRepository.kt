@@ -3,6 +3,7 @@ package com.yangz3720.simplywork.core.session
 import com.yangz3720.simplywork.core.session.store.PayloadStore
 import com.yangz3720.simplywork.core.session.store.SessionStore
 import com.yangz3720.simplywork.infrastructure.error.InfrastructureException
+import com.yangz3720.simplywork.infrastructure.model.model.Attachment
 import com.yangz3720.simplywork.infrastructure.model.model.Message
 import java.util.UUID
 import kotlinx.coroutines.sync.Mutex
@@ -55,8 +56,16 @@ interface SessionRepository {
     /**
      * Appends a user prompt as a NEW BRANCH: sibling of [parentId]'s children, leaf
      * advances to the new node (edit-and-resend semantics, VSCode-Copilot style).
+     *
+     * [attachments] (v1.8) are the turn's uploads; an edit-and-resend carries the original ones over
+     * rather than quietly dropping the images the user attached.
      */
-    suspend fun appendUserPrompt(sessionId: String, parentId: String?, text: String): SessionNode
+    suspend fun appendUserPrompt(
+        sessionId: String,
+        parentId: String?,
+        text: String,
+        attachments: List<Attachment> = emptyList()
+    ): SessionNode
 
     /** Same-parent UserPrompt siblings of [nodeId] (inclusive), ordered by createdAt. */
     fun promptSiblings(sessionId: String, nodeId: String): List<SessionNode>
@@ -193,11 +202,16 @@ class SessionRepositoryImpl(
 
     override fun listNodes(sessionId: String): List<SessionNode> = structureStore.listNodes(sessionId)
 
-    override suspend fun appendUserPrompt(sessionId: String, parentId: String?, text: String): SessionNode =
+    override suspend fun appendUserPrompt(
+        sessionId: String,
+        parentId: String?,
+        text: String,
+        attachments: List<Attachment>
+    ): SessionNode =
         mutex.withLock {
             val payload = json.encodeToJsonElement(
                 Message.serializer(),
-                Message.User(content = text, attachments = emptyList())
+                Message.User(content = text, attachments = attachments)
             ) as JsonObject
             appendNodeLocked(
                 sessionId = sessionId,

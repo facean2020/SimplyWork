@@ -86,8 +86,8 @@ android {
         minSdk = 34
         targetSdk = 35
         // V1.1: fixes the 5 UX issues of V1.0 (dialog shape, API key masking, context window, auto-approval).
-        versionCode = 6
-        versionName = "1.2.3"
+        versionCode = 7
+        versionName = "1.3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -111,6 +111,23 @@ android {
     }
 
     buildTypes {
+        /**
+         * A separate package so a debug build installs **alongside** the release one instead of replacing it.
+         * Same applicationId would mean "upgrade the installed app", which does mean you can never hold both at
+         * once -- and comparing a fix against the shipped build then needs an uninstall.
+         *
+         * Everything the manifest derives from `${applicationId}` follows automatically: the FileProvider
+         * authorities and the MSAL callback host, so the two installs cannot collide on a content:// or a
+         * deep-link scheme.
+         *
+         * Known consequence: [OneDriveMsalConfig] builds its redirect URI from `BuildConfig.APPLICATION_ID`, so
+         * the debug app would sign in at `msauth://com.yangz3720.simplywork.debug/<hash>`, which is not registered
+         * on the Entra app. OneDrive sign-in is therefore expected to fail in debug; that is accepted.
+         */
+        debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+        }
         release {
             // V1.0 trimming: R8 code shrinking + resource shrinking. The keep rules of third-party libraries
             // live in app/proguard-rules.pro, where each entry notes which library it was added for -- this

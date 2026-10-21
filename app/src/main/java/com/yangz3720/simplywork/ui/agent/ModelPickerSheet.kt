@@ -35,7 +35,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.yangz3720.simplywork.infrastructure.model.ModelInfo
+import com.yangz3720.simplywork.infrastructure.model.ModelPricing
 import com.yangz3720.simplywork.infrastructure.model.config.ProviderAccount
+import com.yangz3720.simplywork.ui.settings.formatTokens
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -52,12 +55,12 @@ fun ModelPickerSheet(
     accounts: List<ProviderAccount>,
     activeProviderId: String?,
     activeModel: String,
-    fetchModels: suspend (ProviderAccount) -> Result<List<String>>,
+    fetchModels: suspend (ProviderAccount) -> Result<List<ModelInfo>>,
     onSelect: (providerId: String, model: String) -> Unit,
     onDismiss: () -> Unit
 ) {
     val configured = remember(accounts) { accounts.filter { it.apiKey.isNotBlank() } }
-    var entries by remember { mutableStateOf<List<Pair<ProviderAccount, String>>>(emptyList()) }
+    var entries by remember { mutableStateOf<List<Pair<ProviderAccount, ModelInfo>>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     var search by remember { mutableStateOf("") }
@@ -79,7 +82,7 @@ fun ModelPickerSheet(
             }.awaitAll().flatten()
         }
         entries = merged.sortedWith(
-            compareBy({ (account, _) -> account.id != activeProviderId }, { (account, _) -> account.name }, { (_, model) -> model })
+            compareBy({ (account, _) -> account.id != activeProviderId }, { (account, _) -> account.name }, { (_, info) -> info.id })
         )
         loading = false
         if (merged.isEmpty()) error = "未能获取模型列表，可下拉重试或手动输入模型名"
@@ -111,10 +114,10 @@ fun ModelPickerSheet(
             val query = search.trim()
             val filtered = entries.filter {
                 query.isEmpty() ||
-                    it.second.contains(query, ignoreCase = true) ||
+                    it.second.id.contains(query, ignoreCase = true) ||
                     it.first.name.contains(query, ignoreCase = true)
             }
-            val canManual = query.isNotBlank() && entries.none { it.second.equals(query, ignoreCase = true) }
+            val canManual = query.isNotBlank() && entries.none { it.second.id.equals(query, ignoreCase = true) }
 
             when {
                 loading -> Row(
@@ -134,27 +137,38 @@ fun ModelPickerSheet(
                 )
 
                 else -> LazyColumn(modifier = Modifier.weight(1f, fill = false)) {
-                    items(filtered, key = { "${it.first.id}::${it.second}" }) { (account, model) ->
-                        val selected = account.id == activeProviderId && model == activeModel
+                    items(filtered, key = { "${it.first.id}::${it.second.id}" }) { (account, info) ->
+                        val selected = account.id == activeProviderId && info.id == activeModel
+                        val meta = modelMeta(info)
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
-                                    onSelect(account.id, model)
+                                    onSelect(account.id, info.id)
                                     onDismiss()
                                 }
-                                .padding(vertical = 12.dp)
+                                .padding(vertical = 10.dp)
                         ) {
-                            Text(
-                                text = model,
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = if (selected) MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.onBackground,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f)
-                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = info.id,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = if (selected) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onBackground,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                if (meta.isNotEmpty()) {
+                                    Text(
+                                        text = meta,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
                             Spacer(Modifier.size(8.dp))
                             Text(
                                 text = account.name,
@@ -228,4 +242,33 @@ fun ModelPickerSheet(
             }
         }
     }
+}
+
+/**
+ * The one-line summary under a model name: context window, price, image support.
+ *
+ * Each part appears **only when the endpoint actually reported it** -- a model that disclosed nothing renders as a
+ * bare name rather than a row of dashes, so "unknown" never gets mistaken for a value. In practice that means
+ * OpenRouter rows are rich, DeepSeek rows show a context, and Qwen rows are just names.
+ */
+private fun modelMeta(info: ModelInfo): String = listOfNotNull(
+    info.contextTokens?.let { formatTokens(it) },
+    info.pricing?.let { formatPrice(it) },
+    if (info.supportsVision) "支持图片" else null
+).joinToString(" · ")
+
+/**
+ * `$0.15/$0.60` = USD per 1M input/output tokens. A model that costs nothing says so instead of showing "$0/$0",
+ * because free is a fact worth surfacing when the list is 468 models long.
+ */
+private fun formatPrice(pricing: ModelPricing): String {
+    if (pricing.inputPerMillion <= 0.0 && pricing.outputPerMillion <= 0.0) return "免费"
+    return "${formatUsd(pricing.inputPerMillion)}/${formatUsd(pricing.outputPerMillion)}"
+}
+
+/** Enough decimals to tell a $0.15 model from a $0.075 one, without turning the row into a spreadsheet cell. */
+private fun formatUsd(value: Double): String = when {
+    value >= 1.0 -> "$%.2f".format(value)
+    value >= 0.01 -> "$%.3f".format(value)
+    else -> "$%.4f".format(value)
 }

@@ -2,6 +2,8 @@ package com.yangz3720.simplywork.infrastructure.model.client
 
 import com.yangz3720.simplywork.infrastructure.error.InfrastructureException
 import com.yangz3720.simplywork.infrastructure.model.ModelInfo
+import com.yangz3720.simplywork.infrastructure.model.ModelPricing
+import com.yangz3720.simplywork.infrastructure.model.ModelVisionTable
 import com.yangz3720.simplywork.infrastructure.model.ModelProvider
 import com.yangz3720.simplywork.infrastructure.model.config.ModelCapability
 import com.yangz3720.simplywork.infrastructure.model.config.ModelConfig
@@ -58,10 +60,23 @@ class OpenAiCompatibleClient(
 
     private val tag = "OpenAiClient"
 
+    private companion object {
+        /** Vendors quote USD per single token; the UI speaks per million. */
+        const val TOKENS_PER_MILLION = 1_000_000.0
+    }
+
     /** Possible field names for the context length, see [contextTokensOf]. */
     private val CONTEXT_KEYS = listOf(
         "context_length", "context_window", "max_context_length", "max_input_tokens", "max_model_len"
     )
+
+    /**
+     * Possible field names for the generation limit, see [maxOutputTokensOf].
+     *
+     * `max_completion_tokens` is the newer OpenAI spelling and is what DeepSeek and OpenRouter report;
+     * `max_output_tokens` is DeepSeek's own top-level field.
+     */
+    private val MAX_OUTPUT_KEYS = listOf("max_output_tokens", "max_completion_tokens")
 
     /** Throwaway client (temporary instances such as model-list fetching): close the underlying engine when done to avoid leaking threads. */
     fun close() {
@@ -122,7 +137,14 @@ class OpenAiCompatibleClient(
             .mapNotNull { entry ->
                 val obj = entry as? JsonObject ?: return@mapNotNull null
                 val id = obj["id"]?.jsonPrimitive?.takeIf { it.isString }?.content ?: return@mapNotNull null
-                ModelInfo(id = id, contextTokens = contextTokensOf(obj))
+                ModelInfo(
+                    id = id,
+                    contextTokens = contextTokensOf(obj),
+                    maxOutputTokens = maxOutputTokensOf(obj),
+                    supportsVision = supportsVisionOf(obj, id),
+                    supportsTools = supportsToolsOf(obj),
+                    pricing = pricingOf(obj)
+                )
             }
             .sortedBy { it.id }
     }
@@ -151,6 +173,109 @@ class OpenAiCompatibleClient(
 
     private fun JsonObject.positiveInt(key: String): Int? =
         (this[key] as? JsonPrimitive)?.content?.toIntOrNull()?.takeIf { it > 0 }
+
+    private fun JsonObject.decimal(key: String): Double? =
+        (this[key] as? JsonPrimitive)?.contentOrNull?.toDoubleOrNull()?.takeIf { it >= 0 }
+
+    /** A JSON array of strings; `null` when the key is absent or isn't an array at all. */
+    private fun stringList(element: JsonElement?): List<String>? =
+        (element as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+
+    /**
+     * Read the generation limit out of one /models entry.
+     *
+     * Same discipline as [contextTokensOf]: several spellings, nested or not, `null` when nothing is recognised.
+     * This is **not** the context window -- confusing the two would let a caller ask for more output tokens than
+     * the model can produce.
+     */
+    private fun maxOutputTokensOf(entry: JsonObject): Int? {
+        MAX_OUTPUT_KEYS.firstNotNullOfOrNull { key -> entry.positiveInt(key) }?.let { return it }
+        (entry["top_provider"] as? JsonObject)?.let { nested ->
+            MAX_OUTPUT_KEYS.firstNotNullOfOrNull { key -> nested.positiveInt(key) }?.let { return it }
+        }
+        return null
+    }
+
+    /**
+     * Whether this model accepts image input. Order: what the endpoint reported > [ModelVisionTable] > `false`.
+     *
+     * The vendors that report it spell it differently -- OpenRouter nests `input_modalities` under `architecture`
+     * and also offers a summary `modality` string (`"text+image+file->text"`), DeepSeek puts `input_modalities` at
+     * the top level, Qwen reports neither (which is exactly why the built-in table exists).
+     */
+    private fun supportsVisionOf(entry: JsonObject, modelId: String): Boolean {
+        val architecture = entry["architecture"] as? JsonObject
+        val modalities = stringList(architecture?.get("input_modalities"))
+            ?: stringList(entry["input_modalities"])
+        if (modalities != null) {
+            return modalities.any { it.equals("image", ignoreCase = true) }
+        }
+        // OpenRouter's summary form, e.g. "text+image+file->text": only the part before "->" describes the input.
+        architecture?.get("modality")?.jsonPrimitive?.contentOrNull?.let { summary ->
+            return summary.substringBefore("->").split("+").any { it.trim().equals("image", ignoreCase = true) }
+        }
+        return ModelVisionTable.supports(modelId)
+    }
+
+    /**
+     * Whether this model accepts tool definitions.
+     *
+     * **Defaults to `true`** when the endpoint says nothing: OpenRouter publishes `supported_parameters`, but
+     * DeepSeek and Qwen do not, and defaulting to `false` would declare every model of theirs incapable of the
+     * agent loop's core operation. A tool schema a model ignores is a far cheaper failure than a capability the
+     * app refuses to use.
+     */
+    private fun supportsToolsOf(entry: JsonObject): Boolean {
+        val params = stringList(entry["supported_parameters"]) ?: return true
+        return params.any { it.equals("tools", ignoreCase = true) }
+    }
+
+    /**
+     * Read per-token pricing out of one /models entry, normalised to USD per 1M tokens.
+     *
+     * In practice only OpenRouter publishes this, and it quotes **strings of USD per single token**
+     * (`"0.00000015"` = $0.15/M). Returns null when either the input or output price is missing rather than
+     * presenting a half-filled price as a complete one. `pricing.overrides` (OpenRouter's time-of-day pricing) is
+     * deliberately ignored -- the top-level figure is the one users recognise.
+     */
+    private fun pricingOf(entry: JsonObject): ModelPricing? {
+        val pricing = entry["pricing"] as? JsonObject ?: return null
+        val input = pricing.decimal("prompt") ?: return null
+        val output = pricing.decimal("completion") ?: return null
+        val scale = TOKENS_PER_MILLION
+        return ModelPricing(
+            inputPerMillion = input * scale,
+            outputPerMillion = output * scale,
+            cacheReadPerMillion = pricing.decimal("input_cache_read")?.times(scale)
+        )
+    }
+
+    /**
+     * Parse a `usage` object into [TokenUsage], picking up the vendor extras that all three built-in providers
+     * agree on plus the ones only OpenRouter has.
+     *
+     * `cached_tokens` is read from `prompt_tokens_details` first because OpenAI/OpenRouter/Qwen all put it there;
+     * DeepSeek reports the same number a second time as `prompt_cache_hit_tokens`, which is the fallback rather
+     * than the primary. `cost` exists only on OpenRouter and stays null elsewhere -- it is never estimated.
+     */
+    private fun parseUsage(usageObj: JsonObject?): TokenUsage {
+        if (usageObj == null) return TokenUsage()
+        val prompt = usageObj.int("prompt_tokens") ?: 0
+        val completion = usageObj.int("completion_tokens") ?: 0
+        val promptDetails = usageObj["prompt_tokens_details"] as? JsonObject
+        val completionDetails = usageObj["completion_tokens_details"] as? JsonObject
+        return TokenUsage(
+            promptTokens = prompt,
+            completionTokens = completion,
+            totalTokens = usageObj.int("total_tokens") ?: (prompt + completion),
+            cachedTokens = promptDetails?.int("cached_tokens") ?: usageObj.int("prompt_cache_hit_tokens") ?: 0,
+            reasoningTokens = completionDetails?.int("reasoning_tokens") ?: 0,
+            costUsd = usageObj.decimal("cost")
+        )
+    }
+
+    private fun JsonObject.int(key: String): Int? =
+        (this[key] as? JsonPrimitive)?.contentOrNull?.toIntOrNull()
 
     override fun generateStream(request: ModelRequest): Flow<ModelStreamChunk> = flow {
         val endpoint = resolveEndpoint()
@@ -204,9 +329,7 @@ class OpenAiCompatibleClient(
 
                         // Parse usage if present in stream
                         chunkJson["usage"]?.jsonObject?.let { usageObj ->
-                            val prompt = usageObj["prompt_tokens"]?.jsonPrimitive?.intOrNull ?: 0
-                            val completion = usageObj["completion_tokens"]?.jsonPrimitive?.intOrNull ?: 0
-                            val usage = TokenUsage(promptTokens = prompt, completionTokens = completion)
+                            val usage = parseUsage(usageObj)
                             tokenUsage = usage
                             emit(ModelStreamChunk.UsageUpdate(usage))
                         }
@@ -373,10 +496,14 @@ class OpenAiCompatibleClient(
                     put("content", message.content)
                 } else {
                     put("content", buildJsonArray {
-                        add(buildJsonObject {
-                            put("type", "text")
-                            put("text", message.content)
-                        })
+                        // An upload-only turn has no text of its own; an empty text part is rejected by strict
+                        // endpoints, and the attachments below already say everything there is to say.
+                        if (message.content.isNotBlank()) {
+                            add(buildJsonObject {
+                                put("type", "text")
+                                put("text", message.content)
+                            })
+                        }
                         message.attachments.forEach { att ->
                             when (att) {
                                 is Attachment.Image -> {
@@ -384,6 +511,18 @@ class OpenAiCompatibleClient(
                                         put("type", "image_url")
                                         put("image_url", buildJsonObject {
                                             put("url", "data:${att.mimeType};base64,${att.base64Data}")
+                                        })
+                                    })
+                                }
+                                // Documents are already text: one labelled part. The label is what lets the model
+                                // tell two uploaded files apart -- the text itself carries no file boundary.
+                                is Attachment.Document -> {
+                                    add(buildJsonObject {
+                                        put("type", "text")
+                                        put("text", buildString {
+                                            append("[附件：").append(att.name)
+                                            if (att.truncated) append("（内容过长，仅保留开头部分）")
+                                            append("]\n").append(att.text)
                                         })
                                     })
                                 }
@@ -450,10 +589,7 @@ class OpenAiCompatibleClient(
             finishReason = FinishReason.TOOL_CALLS
         }
 
-        val usageObj = json["usage"]?.jsonObject
-        val promptTokens = usageObj?.get("prompt_tokens")?.jsonPrimitive?.intOrNull ?: 0
-        val completionTokens = usageObj?.get("completion_tokens")?.jsonPrimitive?.intOrNull ?: 0
-        val tokenUsage = TokenUsage(promptTokens, completionTokens)
+        val tokenUsage = parseUsage(json["usage"]?.jsonObject)
 
         return ModelResponse(
             id = id,

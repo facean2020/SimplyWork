@@ -1,6 +1,7 @@
 package com.yangz3720.simplywork.core.agent
 
 import com.yangz3720.simplywork.core.agent.tool.ToolExecutionContext
+import com.yangz3720.simplywork.core.attachment.PromptUploads
 import com.yangz3720.simplywork.core.session.SessionNode
 import com.yangz3720.simplywork.core.session.SessionNodeType
 import com.yangz3720.simplywork.core.session.SessionNodeStatus
@@ -9,6 +10,7 @@ import com.yangz3720.simplywork.core.session.SessionRepository
 import com.yangz3720.simplywork.core.session.SystemPromptKind
 import com.yangz3720.simplywork.infrastructure.error.InfrastructureException
 import com.yangz3720.simplywork.infrastructure.model.ModelProvider
+import com.yangz3720.simplywork.infrastructure.model.model.Attachment
 import com.yangz3720.simplywork.infrastructure.model.model.Message
 import com.yangz3720.simplywork.infrastructure.model.model.ModelResponse
 import com.yangz3720.simplywork.infrastructure.model.model.ToolCall
@@ -61,8 +63,16 @@ class AgentLoopCoordinator(
      * over the existing session without enqueueing a new user message — the Q2 decision
      * (agent-core-design.md §12): transient LLM failures are retried loop-OUTER by the
      * caller (UI retry button), never auto-retried inside the loop.
+     *
+     * [attachments] belong to [initialPrompt] (v1.8): images the user uploaded / documents already
+     * extracted to text. They are persisted with the prompt node, so the transcript and every later
+     * turn still see them.
      */
-    fun run(sessionId: String, initialPrompt: String?): Flow<AgentStepEvent> = flow {
+    fun run(
+        sessionId: String,
+        initialPrompt: String?,
+        attachments: List<Attachment> = emptyList()
+    ): Flow<AgentStepEvent> = flow {
         val session = requireExistingSession(sessionId)
 
         // §2.3: clean up pending nodes a previous (killed) run may have left behind.
@@ -72,7 +82,7 @@ class AgentLoopCoordinator(
         ensureSystemPromptNode(session)
 
         if (initialPrompt != null) {
-            queue.enqueue(IncomingMessage.UserPrompt(initialPrompt))
+            queue.enqueue(IncomingMessage.UserPrompt(initialPrompt, attachments))
         }
         emit(AgentStepEvent.LoopStarted(sessionId))
 
@@ -180,16 +190,18 @@ class AgentLoopCoordinator(
         if (incoming.isEmpty()) return
         var parentId: String? = repository.activePath(sessionId).lastOrNull()?.id
         for (message in incoming) {
-            val (nodeType, payload, tokenText) = when (message) {
+            // Uploads count against the context budget: a document is prompt text, an image is not free either
+            // (its cost follows the pixel grid, which is why it cannot be read off the base64 length).
+            val (nodeType, payload, tokenCount) = when (message) {
                 is IncomingMessage.UserPrompt -> Triple(
                     SessionNodeType.UserPrompt,
                     json.encodeToJsonElement(Message.serializer(), Message.User(message.text, message.attachments)) as JsonObject,
-                    message.text
+                    estimator.estimate(message.text) + PromptUploads.estimatedTokens(message.attachments, estimator)
                 )
                 is IncomingMessage.Steer -> Triple(
                     SessionNodeType.Steer,
                     buildJsonObject { put("text", message.text); put("atLoop", message.atLoop) },
-                    message.text
+                    estimator.estimate(message.text)
                 )
                 is IncomingMessage.FollowUp -> Triple(
                     SessionNodeType.SystemPrompt,
@@ -197,7 +209,7 @@ class AgentLoopCoordinator(
                         put("kind", SystemPromptKind.follow_up.name)
                         put("text", message.text)
                     },
-                    message.text
+                    estimator.estimate(message.text)
                 )
             }
             val node = repository.appendNode(
@@ -205,7 +217,7 @@ class AgentLoopCoordinator(
                 parentId = parentId,
                 nodeType = nodeType,
                 payload = payload,
-                tokenCount = estimator.estimate(tokenText),
+                tokenCount = tokenCount,
                 status = SessionNodeStatus.success
             )
             parentId = node.id

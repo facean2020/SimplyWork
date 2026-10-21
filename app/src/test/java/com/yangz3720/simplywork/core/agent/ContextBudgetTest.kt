@@ -113,7 +113,7 @@ class ContextBudgetTest {
 
     @Test
     fun `nothing known falls back to the default source`() {
-        val plan = ContextBudget.resolve(overrideTokens = null, providerTokens = null, modelId = "gpt-4o")
+        val plan = ContextBudget.resolve(overrideTokens = null, providerTokens = null, modelId = "totally-unknown-model")
 
         assertEquals(24_000, plan.tokens)
         assertNull(plan.modelContextTokens)
@@ -122,7 +122,7 @@ class ContextBudgetTest {
 
     @Test
     fun `nonsensical inputs are treated as absent`() {
-        val zeroOverride = ContextBudget.resolve(overrideTokens = 0, providerTokens = -5, modelId = "gpt-4o")
+        val zeroOverride = ContextBudget.resolve(overrideTokens = 0, providerTokens = -5, modelId = "totally-unknown-model")
         assertEquals(24_000, zeroOverride.tokens)
         assertEquals(ContextBudgetPlan.Source.Default, zeroOverride.source)
     }

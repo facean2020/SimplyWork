@@ -1,6 +1,9 @@
 package com.yangz3720.simplywork.ui.agent
 
 import androidx.activity.compose.LocalActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -81,6 +84,16 @@ fun AgentScreen(
     var showProjects by remember { mutableStateOf(false) }
     var oneDriveTarget by remember { mutableStateOf<Project?>(null) }
     var editingMessage by remember { mutableStateOf<UiMessage?>(null) }
+
+    // v1.8 uploads. The pickers are the platform's own (photo picker / document UI), so no storage or media
+    // permission is involved; the document picker is opened with */* on purpose -- which formats are accepted is
+    // decided in one place (the extractor factory), so adding pdf/word later needs no change here.
+    val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        uri?.let { viewModel.attachUpload(it.toString()) }
+    }
+    val pickDocument = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { viewModel.attachUpload(it.toString()) }
+    }
 
     val activeAccount = state.providerAccounts.firstOrNull { it.id == state.activeProviderId }
     val modelLabel = when {
@@ -252,7 +265,18 @@ fun AgentScreen(
                     onCancelEdit = {
                         editingMessage = null
                         draft = ""
-                    }
+                    },
+                    uploads = state.pendingUploads,
+                    uploadBusy = state.uploadBusy,
+                    uploadError = state.uploadError,
+                    canAttachImage = state.activeModelSupportsVision,
+                    onAddImage = {
+                        pickImage.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                        )
+                    },
+                    onAddDocument = { pickDocument.launch(arrayOf("*/*")) },
+                    onRemoveUpload = { viewModel.removeUpload(it) }
                 )
             }
         ) { innerPadding ->

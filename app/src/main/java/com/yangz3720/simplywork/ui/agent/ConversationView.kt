@@ -138,12 +138,23 @@ private fun UserBubble(
                     onLongClick = { onEditUser(message) }
                 )
         ) {
-            Text(
-                text = message.text,
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-            )
+            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                // v1.8: uploads are shown as chips, not as their payload -- an extracted document is prompt
+                // text for the model, but re-printing 40k characters into the transcript buries the conversation.
+                if (message.attachments.isNotEmpty()) {
+                    message.attachments.forEach { attachment ->
+                        AttachmentChip(attachment)
+                        Spacer(Modifier.size(4.dp))
+                    }
+                }
+                if (message.text.isNotBlank()) {
+                    Text(
+                        text = message.text,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                }
+            }
         }
         // Branch navigation (VSCode-Copilot style): after an edit-and-resend, several prompt branches appear at the same position.
         if (message.branchCount > 1) {
@@ -179,6 +190,29 @@ private fun UserBubble(
                 }
             }
         }
+    }
+}
+
+/**
+ * One upload inside a user bubble: the file name is the whole story, so that is all that is shown.
+ * An upload-only turn renders as chips alone -- the bubble must not show an empty body.
+ */
+@Composable
+private fun AttachmentChip(attachment: UiAttachment) {
+    val prefix = if (attachment.image) "图片" else "文档"
+    val label = "$prefix · ${attachment.name}" + if (attachment.truncated) " · 已截断" else ""
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.10f)
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onPrimaryContainer,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+        )
     }
 }
 
