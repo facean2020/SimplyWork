@@ -15,6 +15,7 @@ import com.yangz3720.simplywork.core.agent.tool.AgentSelfConfig
 import com.yangz3720.simplywork.core.agent.tool.ScriptTools
 import com.yangz3720.simplywork.core.agent.tool.SelfOpsTools
 import com.yangz3720.simplywork.core.agent.tool.TtsTool
+import com.yangz3720.simplywork.core.agent.tool.WebTools
 import com.yangz3720.simplywork.core.attachment.FileImageBlobStore
 import com.yangz3720.simplywork.core.attachment.ImageBlobStore
 import com.yangz3720.simplywork.core.attachment.UploadOwner
@@ -44,6 +45,7 @@ import com.yangz3720.simplywork.infrastructure.systemops.SystemOperationRouterIm
 import com.yangz3720.simplywork.infrastructure.systemops.intent.SystemIntentExecutorImpl
 import com.yangz3720.simplywork.service.AgentRunService
 import com.yangz3720.simplywork.ui.agent.AgentRuntimeOwner
+import io.ktor.client.HttpClient
 import com.yangz3720.simplywork.ui.agent.ApprovalCoordinator
 import com.yangz3720.simplywork.ui.agent.ModelSelection
 import com.yangz3720.simplywork.ui.agent.PermissionCoordinator
@@ -242,6 +244,13 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
     )
 
     /**
+     * Shared HTTP client for the web tools (web_search / web_fetch). Built once per process: the OkHttp
+     * engine is heavy, so rebuilding it on every runtime rebuild would waste work for no benefit (same
+     * rationale as OneDriveService's resident client).
+     */
+    private val webHttpClient: HttpClient by lazy { WebTools.defaultClient() }
+
+    /**
      * Sandbox + async script jobs (v1.6). The engine is lazily bound: this only creates objects, and only
      * the first `js_run` connects to the AndroidX JS service process, so startup costs nothing and cold
      * start is unaffected.
@@ -428,7 +437,8 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
                     projects = projectStore,
                     changes = changeLog
                 ) + ScriptTools.registeredTools(scriptJobs) +
-                    TtsTool.registeredTool(appContext, workspace, projectStore)
+                    TtsTool.registeredTool(appContext, workspace, projectStore) +
+                    WebTools.registeredTools(webHttpClient)
             },
             soul = soul,
             workspace = workspace,
