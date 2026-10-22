@@ -1,11 +1,17 @@
 package com.yangz3720.simplywork.core.session
 
+import com.yangz3720.simplywork.core.attachment.InMemoryImageBlobStore
 import com.yangz3720.simplywork.core.session.store.InMemoryPayloadStore
 import com.yangz3720.simplywork.core.session.store.InMemorySessionStore
 import com.yangz3720.simplywork.infrastructure.error.InfrastructureException
+import com.yangz3720.simplywork.infrastructure.model.model.Attachment
+import com.yangz3720.simplywork.infrastructure.model.model.Message
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
@@ -226,5 +232,28 @@ class SessionRepositoryTest {
         assertTrue(repository.listNodes(gone.id).isEmpty())
         assertEquals(1, repository.listNodes(keep.id).size)
         assertTrue(repository.activePath(keep.id).single().nodeType == SessionNodeType.UserPrompt)
+    }
+
+    @Test
+    fun `deleteSession also drops the image blobs its payloads reference`() = runTest {
+        val blobs = InMemoryImageBlobStore()
+        val repo = SessionRepositoryImpl(InMemorySessionStore(), InMemoryPayloadStore(), blobs)
+        blobs.save("img-1", byteArrayOf(1))
+        blobs.save("img-2", byteArrayOf(2))
+        val session = repo.createSession("pics")
+        val payload = Json.encodeToJsonElement(
+            Message.serializer(),
+            Message.User(
+                content = "看图",
+                attachments = listOf(Attachment.Image(id = "img-1", mimeType = "image/webp", name = "a.webp"))
+            )
+        ) as JsonObject
+        repo.appendNode(session.id, null, SessionNodeType.UserPrompt, payload, 1, SessionNodeStatus.success)
+
+        repo.deleteSession(session.id)
+
+        assertNull(blobs.read("img-1"))
+        // A blob another session still owns must survive.
+        assertArrayEquals(byteArrayOf(2), blobs.read("img-2"))
     }
 }

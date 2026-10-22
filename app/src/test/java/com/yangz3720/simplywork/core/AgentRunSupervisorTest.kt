@@ -41,7 +41,6 @@ class AgentRunSupervisorTest {
         override val providerId = "scripted"
         override val supportedCapabilities = emptySet<ModelCapability>()
         override suspend fun generate(request: ModelRequest) = Result.success(queue.removeFirst())
-        override fun generateStream(request: ModelRequest) = throw UnsupportedOperationException()
     }
 
     /** Hangs forever: used to pin down stop/cancel semantics. */
@@ -53,7 +52,6 @@ class AgentRunSupervisorTest {
             blocker.await()
             return Result.success(response("never"))
         }
-        override fun generateStream(request: ModelRequest) = throw UnsupportedOperationException()
     }
 
     /** A single plain-text turn: the run wraps up in this turn (no tool call -> the completion guard lets it through). */

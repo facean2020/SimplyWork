@@ -8,10 +8,17 @@ import com.yangz3720.simplywork.core.AgentRunSupervisor
 import com.yangz3720.simplywork.core.AgentRuntime
 import com.yangz3720.simplywork.core.agent.AgentStepEvent
 import com.yangz3720.simplywork.core.agent.ContextBudgetPlan
+import com.yangz3720.simplywork.core.agent.NodePayloads
+import com.yangz3720.simplywork.core.attachment.ImageBlobStore
+import com.yangz3720.simplywork.core.attachment.PendingUpload
+import com.yangz3720.simplywork.core.attachment.PromptUploads
+import com.yangz3720.simplywork.core.attachment.UploadOwner
 import com.yangz3720.simplywork.core.cloud.CloudFolder
 import com.yangz3720.simplywork.core.cloud.OneDriveOwner
+import com.yangz3720.simplywork.core.session.Project
 import com.yangz3720.simplywork.core.session.ProjectLogic
 import com.yangz3720.simplywork.core.session.ProjectStore
+import com.yangz3720.simplywork.core.session.SessionNode
 import com.yangz3720.simplywork.core.session.SessionRecord
 import com.yangz3720.simplywork.core.workspace.ExternalPreview
 import com.yangz3720.simplywork.core.workspace.ExternalPreviewException
@@ -19,7 +26,10 @@ import com.yangz3720.simplywork.core.workspace.FileChange
 import com.yangz3720.simplywork.core.workspace.FileChangeKind
 import com.yangz3720.simplywork.core.workspace.FileKinds
 import com.yangz3720.simplywork.core.workspace.ProjectFilesOwner
+import com.yangz3720.simplywork.infrastructure.model.ModelInfo
 import com.yangz3720.simplywork.infrastructure.model.config.ProviderAccount
+import com.yangz3720.simplywork.infrastructure.model.model.Attachment
+import com.yangz3720.simplywork.infrastructure.model.model.Message
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -81,8 +91,14 @@ interface AgentRuntimeOwner {
     /** Settings screen: persist the Markdown Soul belonging to one project. */
     fun saveProjectSoul(projectId: String, content: String)
 
-    /** Fetch the endpoint's available model list for a provider account (GET /models). */
-    suspend fun fetchModels(account: ProviderAccount): Result<List<String>>
+    /** Project deletion: drop the project's Soul together with the rest of its data. */
+    fun deleteProjectSoul(projectId: String)
+
+    /** Chat screen: whether the selected model accepts image input, i.e. whether the image attach entry is offered. */
+    fun activeModelSupportsVision(): Boolean
+
+    /** Fetch the endpoint's model catalogue for a provider account (GET /models), including whatever the vendor disclosed. */
+    suspend fun fetchModels(account: ProviderAccount): Result<List<ModelInfo>>
 }
 
 /**
@@ -115,6 +131,10 @@ class AgentViewModel(
     private val projectFiles: ProjectFilesOwner,
     /** External preview seam (v1.7): types this app cannot render (audio, images) go to an outside app instead of pulling a decoder/player into the build. */
     private val externalPreview: ExternalPreview,
+    /** Upload seam (v1.8): a picked image / document becomes something the model can read. */
+    private val uploads: UploadOwner,
+    /** v1.9: binary image store, shared with the upload loader and the request formatter (thumbnails read from it). */
+    private val imageBlobs: ImageBlobStore? = null,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : ViewModel() {
 
@@ -123,6 +143,7 @@ class AgentViewModel(
 
     private fun initialState(): AgentUiState {
         val selection = owner.selection()
+        // Souls are files: they are not read here (this runs on the main thread) -- see the init block.
         return AgentUiState(
             providerAccounts = owner.accounts(),
             activeProviderId = selection?.providerId,
@@ -130,13 +151,15 @@ class AgentViewModel(
             modelConfigured = selection != null && selection.model.isNotBlank(),
             projects = projectStore.list(),
             currentProjectId = projectStore.currentId(),
-            projectSouls = projectStore.list().associate { project ->
-                project.id to owner.loadProjectSoul(project.id)
-            },
             autoApproveNonDestructive = owner.autoApproveNonDestructive(),
-            contextBudget = owner.contextBudget()
+            contextBudget = owner.contextBudget(),
+            activeModelSupportsVision = owner.activeModelSupportsVision()
         )
     }
+
+    /** Reads every project's Soul file: one file read per project, so callers must already be off the main thread. */
+    private fun loadProjectSouls(projects: List<Project>): Map<String, String> =
+        projects.associate { project -> project.id to owner.loadProjectSoul(project.id) }
 
     /** HITL pending request (Q1); when non-null the UI shows the approval dialog. */
     val approval = approvalCoordinator.pending
@@ -149,6 +172,9 @@ class AgentViewModel(
 
     init {
         viewModelScope.launch(ioDispatcher) {
+            // Read once, then publish: `update` re-runs its lambda on contention, and this one does file IO.
+            val souls = loadProjectSouls(_uiState.value.projects)
+            _uiState.update { it.copy(projectSouls = souls) }
             val sessions = sessionsForCurrentProject(repository()?.listSessions().orEmpty())
             _uiState.update { it.copy(sessions = sessions) }
             // The currently executing run takes over first: coming back from the notification / after an Activity
@@ -212,6 +238,7 @@ class AgentViewModel(
     /** ChatGPT-style new chat: clears the current projection; the session is only persisted when the first message is sent (owned by the current project). */
     fun startNewChat() {
         runSupervisor.stop()
+        clearStreaming()
         // copy rather than rebuild: only the session projection is cleared, so provider / project / OneDrive and
         // other orthogonal state all survive (a rebuild-style version would silently drop fields when new ones are added).
         _uiState.update { current ->
@@ -265,7 +292,8 @@ class AgentViewModel(
 
     /**
      * Delete a project (**irreversible**; the UI must confirm with a dialog first): everything under the project
-     * is wiped -- all sessions (messages + payload + change log), the sandbox directory, the cloud sync baseline, and only then the project entry.
+     * is wiped -- all sessions (messages + payload + change log), the sandbox directory, the Soul, the cloud sync
+     * baseline, and only then the project entry.
      *
      * Cloud **files are kept**: unbinding only drops the baseline; deleting a local project never touches the user's drive.
      * The order is deliberately "clear the child data first, delete the entry last": if it fails midway the project
@@ -292,6 +320,8 @@ class AgentViewModel(
                 }
             oneDrive.unbind(projectId)
             projectFiles.deleteProject(projectId)
+            // The Soul lives outside the sandbox (souls/<projectId>.md), so wiping the directory is not enough.
+            owner.deleteProjectSoul(projectId)
             projectStore.delete(projectId).fold(
                 onSuccess = {
                     // The current project was deleted -> the session projection must fall back with it, otherwise the chat stays on a session of the deleted project.
@@ -507,6 +537,7 @@ class AgentViewModel(
     fun openSession(sessionId: String) {
         if (_uiState.value.currentSessionId == sessionId) return
         runSupervisor.stop()
+        clearStreaming()
         switchToSession(sessionId)
     }
 
@@ -538,7 +569,7 @@ class AgentViewModel(
         val all = repository()?.listSessions().orEmpty()
         val currentProjectId = projectStore.currentId()
         val projects = projectStore.list()
-        val souls = projects.associate { project -> project.id to owner.loadProjectSoul(project.id) }
+        val souls = loadProjectSouls(projects)
         _uiState.update {
             it.copy(
                 projects = projects,
@@ -561,19 +592,75 @@ class AgentViewModel(
 
     /**
      * Send input: when idle -> start a run; while running -> degrade to Steer (takes effect on the next loop step).
+     *
+     * v1.8: pending uploads ride along. They are converted here and cleared in the same `update` that hands
+     * the prompt off -- a chip left behind would be attached again on the next message.
+     *
+     * Steering is text-only (design §6 node B): the input bar refuses to attach while a run is in flight
+     * rather than letting an upload be silently dropped here.
      */
     fun send(text: String) {
         val trimmed = text.trim()
-        if (trimmed.isEmpty()) return
+        val picked = _uiState.value.pendingUploads
+        if (trimmed.isEmpty() && picked.isEmpty()) return
         val state = _uiState.value
         if (state.running) {
             runSupervisor.steer(trimmed)
             return
         }
+        val attachments = PromptUploads.attachments(picked)
+        // An upload-only turn still needs a title: the file name says more than "新对话" ever could.
+        val titleSource = trimmed.ifBlank { picked.firstOrNull()?.name.orEmpty() }
         viewModelScope.launch(ioDispatcher) {
-            val sessionId = state.currentSessionId ?: createSessionFor(trimmed)
-            startRun(sessionId, trimmed)
+            val sessionId = state.currentSessionId ?: createSessionFor(titleSource)
+            // Chips survive a refused start (model not configured): the pick is the expensive part, and the
+            // user can retry after configuring instead of re-selecting the same file.
+            if (startRun(sessionId, trimmed, attachments)) {
+                _uiState.update { it.copy(pendingUploads = emptyList(), uploadError = null) }
+            }
         }
+    }
+
+    // ----- Uploads (v1.8) -----
+
+    /**
+     * Pick an image / document. Conversion happens **now** rather than at send time: a format the app cannot
+     * read has to be reported while the user is still standing at the picker, not after they hit send.
+     */
+    fun attachUpload(uri: String, name: String? = null) {
+        if (_uiState.value.uploadBusy) return
+        _uiState.update { it.copy(uploadBusy = true, uploadError = null) }
+        viewModelScope.launch(ioDispatcher) {
+            uploads.load(uri, name).fold(
+                onSuccess = { upload ->
+                    _uiState.update { it.copy(pendingUploads = it.pendingUploads + upload, uploadBusy = false) }
+                },
+                onFailure = { e ->
+                    _uiState.update { it.copy(uploadBusy = false, uploadError = e.message ?: "无法添加该文件") }
+                }
+            )
+        }
+    }
+
+    /** Drop one chip (the file was picked by mistake, or the payload is simply no longer wanted). */
+    fun removeUpload(uploadId: String) {
+        _uiState.update { state ->
+            state.copy(pendingUploads = state.pendingUploads.filterNot { it.id == uploadId })
+        }
+        // The image blob was written at pick time and is not yet referenced by any session:
+        // release it now or the file would sit there unreferenced forever.
+        viewModelScope.launch(ioDispatcher) { uploads.release(uploadId) }
+    }
+
+    /**
+     * Raw WebP bytes for a blob id (v1.9 thumbnails). Runs on the caller's dispatcher -- the Compose
+     * side already wraps this in `Dispatchers.IO` (see `rememberImageThumb`). Null when no store is
+     * wired or the blob is gone; the thumb then falls back to its placeholder.
+     */
+    fun loadImageBytes(imageId: String): ByteArray? = imageBlobs?.read(imageId)
+
+    fun dismissUploadError() {
+        _uiState.update { it.copy(uploadError = null) }
     }
 
     /** Q2: loop restart from the outside after a failure -- resume in the same session without appending any user message. */
@@ -600,7 +687,9 @@ class AgentViewModel(
             val node = withContext(ioDispatcher) {
                 repository.listNodes(sessionId).firstOrNull { it.id == messageId }
             } ?: return@launch
-            repository.appendUserPrompt(sessionId, node.parentId, trimmed)
+            // An edited prompt keeps the uploads of the turn it replaces: re-asking the same question about
+            // the same image should not quietly turn into a question with no image.
+            repository.appendUserPrompt(sessionId, node.parentId, trimmed, attachmentsOf(node))
             startRun(sessionId, initialPrompt = null)
         }
     }
@@ -624,9 +713,18 @@ class AgentViewModel(
         }
     }
 
+    /** The attachments of one persisted node; an unreadable payload means none (the edit itself still goes through). */
+    private fun attachmentsOf(node: SessionNode): List<Attachment> {
+        val repository = repository() ?: return emptyList()
+        return runCatching {
+            (NodePayloads.decodeMessage(repository.payload(node)) as? Message.User)?.attachments.orEmpty()
+        }.getOrDefault(emptyList())
+    }
+
     /** Run abort (matching ChatGPT's stop semantics): already-persisted nodes are kept; pending nodes are swept by the next run. */
     fun stopRun() {
         runSupervisor.stop()
+        clearStreaming()
     }
 
     fun respondApproval(allowed: Boolean) {
@@ -708,7 +806,15 @@ class AgentViewModel(
         val trimmed = model.trim()
         if (trimmed.isEmpty()) return
         owner.applySelection(providerId, trimmed)
-        _uiState.update { it.copy(activeProviderId = providerId, activeModel = trimmed, modelConfigured = true) }
+        _uiState.update {
+            it.copy(
+                activeProviderId = providerId,
+                activeModel = trimmed,
+                modelConfigured = true,
+                // Re-read it: the attach entry must follow the new model, not the previous one's capability.
+                activeModelSupportsVision = owner.activeModelSupportsVision()
+            )
+        }
     }
 
     /** Settings screen: save the provider's API key. */
@@ -738,7 +844,13 @@ class AgentViewModel(
     }
 
     /** Chat screen / settings screen: fetch a provider's model list (GET /models). */
-    suspend fun fetchModels(account: ProviderAccount): Result<List<String>> = owner.fetchModels(account)
+    suspend fun fetchModels(account: ProviderAccount): Result<List<ModelInfo>> {
+        val result = owner.fetchModels(account)
+        // Fetching the catalogue may have just taught us the *selected* model's vision capability, so the attach
+        // entry has to be re-evaluated even though the selection itself didn't change.
+        _uiState.update { it.copy(activeModelSupportsVision = owner.activeModelSupportsVision()) }
+        return result
+    }
 
     // ----- Internals -----
 
@@ -761,16 +873,38 @@ class AgentViewModel(
     }
 
     /**
-     * Start a run. Driving is handed to [runSupervisor] (it brings up the foreground service to stay alive
+     * Start a run; false = refused (no model configured) and nothing was handed off.
+     * Driving is handed to [runSupervisor] (it brings up the foreground service to stay alive
      * itself); this VM only handles pre-checks and optimistic UI feedback. [AgentUiState.running]'s real source is the supervisor's state flow.
      */
-    private fun startRun(sessionId: String, initialPrompt: String?) {
+    private fun startRun(
+        sessionId: String,
+        initialPrompt: String?,
+        attachments: List<Attachment> = emptyList()
+    ): Boolean {
         if (owner.current() == null) {
             _uiState.update { it.copy(runError = "模型未配置，请先在设置中完成配置") }
-            return
+            return false
         }
         _uiState.update { it.copy(running = true, runError = null, iteration = 0) }
-        runSupervisor.start(sessionId, initialPrompt)
+        runSupervisor.start(sessionId, initialPrompt, attachments)
+        return true
+    }
+
+    /**
+     * Streaming text buffer: deltas arrive much faster than the UI can usefully redraw, so they are
+     * accumulated here and flushed to [AgentUiState.streamingText] at most every [STREAM_FLUSH_MS].
+     * Cleared when the turn lands in the persisted projection (ModelTurn / Completed / Failed).
+     */
+    private val streamingBuffer = StringBuilder()
+    private var lastStreamFlushMs = 0L
+
+    private companion object {
+        /** UI flush cadence while streaming: ~20fps of markdown re-render is enough for "live typing". */
+        const val STREAM_FLUSH_MS = 50L
+
+        /** Also flush when the buffer is large, so a burst of deltas does not stay invisible for a full tick. */
+        const val STREAM_FLUSH_CHARS = 2_000
     }
 
     private suspend fun onEvent(event: AgentStepEvent) {
@@ -781,9 +915,20 @@ class AgentViewModel(
             // User messages / steers become visible as soon as they are persisted (no waiting for the next ModelTurn).
             is AgentStepEvent.InboundPersisted -> refreshConversation()
 
+            is AgentStepEvent.AssistantTextDelta -> {
+                streamingBuffer.append(event.delta)
+                val now = System.currentTimeMillis()
+                if (now - lastStreamFlushMs >= STREAM_FLUSH_MS || streamingBuffer.length >= STREAM_FLUSH_CHARS) {
+                    lastStreamFlushMs = now
+                    val snapshot = streamingBuffer.toString()
+                    _uiState.update { it.copy(streamingText = snapshot) }
+                }
+            }
+
             is AgentStepEvent.ModelTurn -> {
                 // promptTokens is exactly the context size actually sent in this turn -- that is what compaction looks at,
                 // so it is surfaced to the settings screen as the "current context usage" directly.
+                clearStreaming()
                 _uiState.update { it.copy(contextPromptTokens = event.promptTokens) }
                 refreshConversation()
             }
@@ -807,6 +952,7 @@ class AgentViewModel(
 
             is AgentStepEvent.Completed -> {
                 // The agent may have changed config during the run: land the pending rebuild (takes effect on the next run).
+                clearStreaming()
                 owner.rebuildRuntimeIfNeeded()
                 refreshSelection()
                 refreshConversation()
@@ -817,6 +963,7 @@ class AgentViewModel(
             }
 
             is AgentStepEvent.Failed -> {
+                clearStreaming()
                 owner.rebuildRuntimeIfNeeded()
                 _uiState.update {
                     it.copy(runError = event.cause.message ?: event.cause::class.simpleName)
@@ -824,6 +971,12 @@ class AgentViewModel(
                 refreshConversation()
             }
         }
+    }
+
+    private fun clearStreaming() {
+        streamingBuffer.setLength(0)
+        lastStreamFlushMs = 0L
+        _uiState.update { it.copy(streamingText = null) }
     }
 
     /** Rebuild the conversation projection from persisted facts (the active path -> UiMessage; the full node set provides branch info). */

@@ -1,6 +1,7 @@
 package com.yangz3720.simplywork.core.agent
 
 import com.yangz3720.simplywork.core.agent.tool.AgentToolRegistry
+import com.yangz3720.simplywork.core.session.ProjectLogic
 import com.yangz3720.simplywork.core.session.SessionNode
 import com.yangz3720.simplywork.core.session.SessionNodeType
 import com.yangz3720.simplywork.core.session.SessionRepository
@@ -21,7 +22,9 @@ import java.util.Locale
  * (agent-core-design.md §5, §6 step ⑥).
  *
  * Injection order (top-down):
- * 1. System message: base system prompt + skill fragment + State Memory block (forced, every loop)
+ * 1. System message: base system prompt + project Soul + project `AGENTS.md` + State Memory block
+ *    (forced, every loop). Both project documents are compacted by [PromptDocCompactor] and skipped
+ *    when blank, so a project that configured neither injects nothing extra.
  * 2. Episode summaries (Summary nodes) as System messages
  * 3. All remaining nodes in chronological order (working memory + not-yet-compacted rounds)
  *
@@ -35,21 +38,25 @@ class AgentContextAssembler(
     private val registry: AgentToolRegistry,
     private val config: AgentConfig,
     private val soul: AgentSoul,
-    private val workspace: AgentWorkspace
+    private val workspace: AgentWorkspace,
+    private val estimator: TokenEstimator
 ) {
 
     suspend fun assemble(sessionId: String, path: List<SessionNode>): ModelRequest {
-        val projectId = repository.getSession(sessionId)?.projectId
+        // pre-v1.3 rows carry no project id but belong to the default project everywhere else
+        // (AgentViewModel.sessionsFor / SessionRecord.projectId) -- the injected context must agree,
+        // otherwise an old session would silently lose the default project's Soul and AGENTS.md.
+        val projectId = repository.getSession(sessionId)?.projectId ?: ProjectLogic.DEFAULT_PROJECT_ID
         val state = repository.loadState(sessionId)
+        val projectDocs = listOfNotNull(
+            soul.loadProjectSoul(projectId)?.let { doc(SOUL_HEADER, it) },
+            WorkspaceAgentMd.loadAgentMd(workspace.projectDir(projectId, false), estimator)
+                ?.let { doc(AGENTS_MD_HEADER, it) }
+        )
         val systemText = buildString {
             append(config.systemPrompt)
+            projectDocs.forEach { append("\n\n").append(it) }
             append("\n\n")
-            if (projectId != null) {
-                soul.loadProjectSoul(projectId)
-                    ?.let { append(it).append("\n\\n") }
-                WorkspaceAgentMd.loadAgentMd(workspace.projectDir(projectId, false))
-                    ?.let { append(it).append("\n\n") }
-            }
             append(state.toPromptBlock())
         }
 
@@ -78,6 +85,17 @@ class AgentContextAssembler(
         )
     }
 
+    /**
+     * One project document as a labelled, compacted block; null when nothing is left to inject.
+     *
+     * The label matters: without it the model cannot tell where the Soul ends and `AGENTS.md` begins,
+     * and a Soul that happens to end mid-sentence looks like it continues into the state block.
+     */
+    private fun doc(header: String, text: String): String? {
+        val compacted = PromptDocCompactor.compact(text, estimator).trim()
+        return if (compacted.isEmpty()) null else "[$header]\n$compacted"
+    }
+
     /** Node → conversation message; null = node contributes no message (skipped defensively). */
     private suspend fun nodeToMessage(node: SessionNode): Message? = try {
         val payload = repository.payload(node)
@@ -89,7 +107,12 @@ class AgentContextAssembler(
                 // not per node. A wall-clock stamp is what the model can reason with ("yesterday",
                 // "this Friday"); raw epoch ms is not. Zone rules resolve DST into the printed
                 // offset, so no local DST knowledge is needed anywhere in the pipeline.
-                Message.User(content = "[message time: ${turnTime(node.createdAt)}]\n${user.content}")
+                // v1.8: attachments travel with the turn (uploaded image / extracted document text) --
+                // dropping them here would silently send an empty prompt for an upload-only turn.
+                Message.User(
+                    content = "[message time: ${turnTime(node.createdAt)}]\n${user.content}",
+                    attachments = user.attachments
+                )
             }
             SessionNodeType.Steer -> Message.User(content = "[steering] ${payload["text"]?.jsonPrimitive?.content.orEmpty()}")
             SessionNodeType.ToolCall -> NodePayloads.decodeMessage(payload) as? Message.Assistant
@@ -143,5 +166,11 @@ class AgentContextAssembler(
             i++
         }
         return repaired
+    }
+
+    private companion object {
+        /** Section labels of the two project documents (same convention as `[STATE MEMORY]`). */
+        const val SOUL_HEADER = "PROJECT SOUL"
+        const val AGENTS_MD_HEADER = "PROJECT INSTRUCTIONS (AGENTS.md)"
     }
 }

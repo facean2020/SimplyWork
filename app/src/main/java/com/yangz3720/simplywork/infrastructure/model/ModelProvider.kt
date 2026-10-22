@@ -5,6 +5,7 @@ import com.yangz3720.simplywork.infrastructure.model.model.ModelRequest
 import com.yangz3720.simplywork.infrastructure.model.model.ModelResponse
 import com.yangz3720.simplywork.infrastructure.model.model.ModelStreamChunk
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 
 /**
  * Unified gateway interface for LLM invocation.
@@ -24,8 +25,17 @@ interface ModelProvider {
 
     /**
      * Executes streaming model generation returning a cold Flow of [ModelStreamChunk].
+     *
+     * Default: wraps [generate] as a single [ModelStreamChunk.Completed] (or [ModelStreamChunk.Error]),
+     * so providers without native SSE still work on the streaming path. [OpenAiCompatibleClient]
+     * overrides this with real incremental deltas.
      */
-    fun generateStream(request: ModelRequest): Flow<ModelStreamChunk>
+    fun generateStream(request: ModelRequest): Flow<ModelStreamChunk> = flow {
+        generate(request).fold(
+            onSuccess = { emit(ModelStreamChunk.Completed(it.finishReason, it)) },
+            onFailure = { emit(ModelStreamChunk.Error(it)) }
+        )
+    }
 
     /**
      * Lists model ids available at this endpoint (OpenAI-compatible GET /models).

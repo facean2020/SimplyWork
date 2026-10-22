@@ -39,8 +39,7 @@ data class ModelResponse(
     val message: Message.Assistant,
     val finishReason: FinishReason,
     val usage: TokenUsage = TokenUsage(),
-    val latencyMs: Long = 0L,
-    val cachedTokens: Int = 0
+    val latencyMs: Long = 0L
 ) {
     val hasToolCalls: Boolean get() = message.toolCalls.isNotEmpty()
     val toolCalls: List<ToolCall> get() = message.toolCalls

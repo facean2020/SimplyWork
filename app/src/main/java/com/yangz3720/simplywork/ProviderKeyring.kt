@@ -2,6 +2,7 @@ package com.yangz3720.simplywork
 
 import android.content.SharedPreferences
 import androidx.core.content.edit
+import com.yangz3720.simplywork.infrastructure.model.ModelInfo
 import com.yangz3720.simplywork.infrastructure.model.config.ModelConfig
 import com.yangz3720.simplywork.infrastructure.model.config.ModelProviderPresets
 import com.yangz3720.simplywork.infrastructure.model.config.ProviderAccount
@@ -30,6 +31,15 @@ data class KeyringState(
      * "known" impossible to tell apart again.
      */
     val modelContextTokens: Map<String, Int> = emptyMap(),
+    /**
+     * v1.9: whether each model accepts image input, keyed by [KeyringLogic.contextKey]. Recorded from the same
+     * `/models` response as [modelContextTokens], so learning it costs no extra request.
+     *
+     * A stored value is the **final** answer (endpoint report, else the built-in `ModelVisionTable`, else false),
+     * which is what the attach button needs. A model missing from this map is simply "not learned yet" and falls
+     * back to the table at read time -- so a table update still reaches models the user never re-fetched.
+     */
+    val modelVision: Map<String, Boolean> = emptyMap(),
     /** v1.1: manual override of the context budget; null = automatic derivation (see `ContextBudget.resolve`). */
     val contextBudgetOverride: Int? = null
 )
@@ -114,6 +124,25 @@ object KeyringLogic {
     /** v1.1: manually specify the context budget; null or a non-positive value = back to automatic derivation. */
     fun withContextBudgetOverride(state: KeyringState, tokens: Int?): KeyringState =
         state.copy(contextBudgetOverride = tokens?.takeIf { it > 0 })
+
+    /**
+     * v1.9: record everything one `/models` response told us about a provider's models -- the context lengths and
+     * the image capability together, in **one** persist + one version bump (the same reason [withModelContexts]
+     * batches: a single "fetch the list" would otherwise trigger one runtime rebuild per model).
+     */
+    fun withModelCatalog(state: KeyringState, accountId: String, catalog: List<ModelInfo>): KeyringState {
+        if (catalog.isEmpty()) return state
+        val withContexts = withModelContexts(
+            state,
+            catalog.mapNotNull { info ->
+                info.contextTokens?.let { contextKey(accountId, info.id) to it }
+            }.toMap()
+        )
+        return withContexts.copy(
+            modelVision = withContexts.modelVision +
+                catalog.associate { contextKey(accountId, it.id) to it.supportsVision }
+        )
+    }
 
     /**
      * Cache key for model context. **Must include the provider**: models with the same name can have

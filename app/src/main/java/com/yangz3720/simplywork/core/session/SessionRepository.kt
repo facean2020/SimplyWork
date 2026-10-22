@@ -1,8 +1,10 @@
 package com.yangz3720.simplywork.core.session
 
+import com.yangz3720.simplywork.core.attachment.ImageBlobStore
 import com.yangz3720.simplywork.core.session.store.PayloadStore
 import com.yangz3720.simplywork.core.session.store.SessionStore
 import com.yangz3720.simplywork.infrastructure.error.InfrastructureException
+import com.yangz3720.simplywork.infrastructure.model.model.Attachment
 import com.yangz3720.simplywork.infrastructure.model.model.Message
 import java.util.UUID
 import kotlinx.coroutines.sync.Mutex
@@ -55,8 +57,16 @@ interface SessionRepository {
     /**
      * Appends a user prompt as a NEW BRANCH: sibling of [parentId]'s children, leaf
      * advances to the new node (edit-and-resend semantics, VSCode-Copilot style).
+     *
+     * [attachments] (v1.8) are the turn's uploads; an edit-and-resend carries the original ones over
+     * rather than quietly dropping the images the user attached.
      */
-    suspend fun appendUserPrompt(sessionId: String, parentId: String?, text: String): SessionNode
+    suspend fun appendUserPrompt(
+        sessionId: String,
+        parentId: String?,
+        text: String,
+        attachments: List<Attachment> = emptyList()
+    ): SessionNode
 
     /** Same-parent UserPrompt siblings of [nodeId] (inclusive), ordered by createdAt. */
     fun promptSiblings(sessionId: String, nodeId: String): List<SessionNode>
@@ -93,7 +103,8 @@ interface SessionRepository {
 
 class SessionRepositoryImpl(
     private val structureStore: SessionStore,
-    private val payloadStore: PayloadStore
+    private val payloadStore: PayloadStore,
+    private val imageBlobs: ImageBlobStore? = null
 ) : SessionRepository {
 
     private val mutex = Mutex()
@@ -193,11 +204,16 @@ class SessionRepositoryImpl(
 
     override fun listNodes(sessionId: String): List<SessionNode> = structureStore.listNodes(sessionId)
 
-    override suspend fun appendUserPrompt(sessionId: String, parentId: String?, text: String): SessionNode =
+    override suspend fun appendUserPrompt(
+        sessionId: String,
+        parentId: String?,
+        text: String,
+        attachments: List<Attachment>
+    ): SessionNode =
         mutex.withLock {
             val payload = json.encodeToJsonElement(
                 Message.serializer(),
-                Message.User(content = text, attachments = emptyList())
+                Message.User(content = text, attachments = attachments)
             ) as JsonObject
             appendNodeLocked(
                 sessionId = sessionId,
@@ -290,10 +306,29 @@ class SessionRepositoryImpl(
     override suspend fun deleteSession(sessionId: String) {
         // Structure first, payload after: the other way round, being killed midway leaves a row pointing at a payload that does not
         // exist (reading it throws PayloadMissing), whereas deleting the structure first at worst leaves an unreadable dead file.
+        // Image blobs are collected before either delete (they are named only inside the payloads) and removed last.
         mutex.withLock {
+            val imageIds = collectImageIds(sessionId)
             structureStore.deleteSession(sessionId)
             payloadStore.delete(sessionId)
+            imageIds.forEach { imageBlobs?.delete(it) }
         }
+    }
+
+    /** Image blob ids referenced by any payload of [sessionId] (edit-and-resend shares one blob across branches). */
+    private fun collectImageIds(sessionId: String): Set<String> {
+        if (imageBlobs == null) return emptySet()
+        val ids = mutableSetOf<String>()
+        structureStore.listNodes(sessionId).forEach { node ->
+            runCatching {
+                val raw = payloadStore.read(sessionId, node.id) ?: return@runCatching
+                val message = json.decodeFromString(Message.serializer(), raw)
+                if (message is Message.User) {
+                    message.attachments.filterIsInstance<Attachment.Image>().forEach { ids.add(it.id) }
+                }
+            }
+        }
+        return ids
     }
 
     private companion object {

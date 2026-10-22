@@ -5,6 +5,7 @@ import com.yangz3720.simplywork.core.session.SessionNode
 import com.yangz3720.simplywork.core.session.SessionNodeStatus
 import com.yangz3720.simplywork.core.session.SessionNodeType
 import com.yangz3720.simplywork.core.workspace.FileChange
+import com.yangz3720.simplywork.infrastructure.model.model.Attachment
 import com.yangz3720.simplywork.infrastructure.model.model.Message
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -46,7 +47,9 @@ object ConversationRenderer {
                         messages.add(
                             UiMessage(
                                 node.id, UiMessageKind.User, it.content, node.createdAt,
-                                branchIndex = index, branchCount = siblings.size
+                                branchIndex = index, branchCount = siblings.size,
+                                // v1.8: uploads render as chips, never as raw payload.
+                                attachments = it.attachments.map(::toUiAttachment)
                             )
                         )
                     }
@@ -137,6 +140,16 @@ object ConversationRenderer {
         return messages.map { message ->
             byCall[message.toolCallId]?.let { message.copy(fileChange = it) } ?: message
         }
+    }
+
+    /** Payload → display: images carry their blob id for the thumbnail; documents are name-only chips. */
+    private fun toUiAttachment(attachment: Attachment): UiAttachment = when (attachment) {
+        is Attachment.Image -> UiAttachment(
+            name = attachment.name ?: "已上传",
+            image = true,
+            imageId = attachment.id
+        )
+        is Attachment.Document -> UiAttachment(name = attachment.name, image = false, truncated = attachment.truncated)
     }
 
     private fun decodeOrNull(json: JsonObject): Message? = runCatching {

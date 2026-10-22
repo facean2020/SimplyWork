@@ -1,0 +1,8 @@
+<resources>
+    <!--
+      Debug-only app name override: the launcher shows "SimplyWork Debug" so the two installs (release and the
+      .debug package) are distinguishable without opening them. Kept in the debug source set rather than a
+      resValue so the release resource stays exactly what it was.
+    -->
+    <string name="app_name">SimplyWork Debug</string>
+</resources>

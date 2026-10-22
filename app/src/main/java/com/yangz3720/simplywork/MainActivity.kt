@@ -28,7 +28,9 @@ class MainActivity : ComponentActivity() {
                         container.projectStore,
                         container.oneDrive,
                         container.projectFiles,
-                        container.externalPreview
+                        container.externalPreview,
+                        container.uploads,
+                        container.imageBlobs
                     ) as T
             }
         )[AgentViewModel::class.java]

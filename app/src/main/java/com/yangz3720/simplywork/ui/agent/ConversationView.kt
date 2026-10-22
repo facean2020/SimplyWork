@@ -65,14 +65,19 @@ fun ConversationList(
     messages: List<UiMessage>,
     modifier: Modifier = Modifier,
     onEditUser: (UiMessage) -> Unit = {},
-    onSwitchBranch: (UiMessage, Int) -> Unit = { _, _ -> }
+    onSwitchBranch: (UiMessage, Int) -> Unit = { _, _ -> },
+    /** Resolves an image blob id to raw bytes for attachment thumbnails (null = no store wired). */
+    loadImageBytes: (String) -> ByteArray? = { null },
+    /** In-flight assistant text (streaming). Rendered as a live markdown item at the tail of the list. */
+    streamingText: String? = null
 ) {
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
     val expanded = remember { mutableStateMapOf<String, Boolean>() }
 
-    // Stick to the bottom and scroll when new content arrives.
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
+    // Stick to the bottom and scroll when new content arrives (including streaming growth).
+    val tailCount = messages.size + (if (streamingText != null) 1 else 0)
+    LaunchedEffect(tailCount) {
+        if (tailCount > 0) listState.animateScrollToItem(tailCount - 1)
     }
 
     LazyColumn(
@@ -90,10 +95,68 @@ fun ConversationList(
                     expanded[key] = !(expanded[key] ?: false)
                 },
                 onEditUser = onEditUser,
-                onSwitchBranch = onSwitchBranch
+                onSwitchBranch = onSwitchBranch,
+                loadImageBytes = loadImageBytes
             )
         }
+        if (streamingText != null) {
+            item(key = "streaming") {
+                StreamingAssistantText(text = streamingText)
+            }
+        }
     }
+}
+
+/**
+ * Live assistant text while a model turn is still streaming: same typography pipeline as the
+ * finished [AssistantText], fed with the partial markdown so far. A soft cursor marks the tail.
+ */
+@Composable
+private fun StreamingAssistantText(text: String) {
+    val body = MaterialTheme.typography.bodyLarge
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 2.dp, vertical = 2.dp)
+    ) {
+        Markdown(
+            content = text,
+            colors = markdownColor(text = MaterialTheme.colorScheme.onBackground),
+            typography = markdownTypography(
+                text = body,
+                paragraph = body,
+                h1 = chatHeading(body, 24.sp),
+                h2 = chatHeading(body, 20.sp),
+                h3 = chatHeading(body, 18.sp),
+                h4 = chatHeading(body, 16.sp),
+                h5 = chatHeading(body, 15.sp),
+                h6 = chatHeading(body, 14.sp)
+            ),
+            modifier = Modifier.fillMaxWidth()
+        )
+        // Blinking tail cursor: cheap proof that the turn is still live (text may end on a partial token).
+        StreamingCursor()
+    }
+}
+
+@Composable
+private fun StreamingCursor() {
+    var visible by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(530)
+            visible = !visible
+        }
+    }
+    Box(
+        modifier = Modifier
+            .padding(start = 2.dp, top = 2.dp)
+            .size(width = 8.dp, height = 16.dp)
+            .background(
+                color = MaterialTheme.colorScheme.primary.copy(alpha = if (visible) 0.85f else 0.15f),
+                shape = RoundedCornerShape(1.dp)
+            )
+    )
 }
 
 @Composable
@@ -102,10 +165,11 @@ private fun MessageItem(
     expanded: Boolean,
     onToggleExpand: () -> Unit,
     onEditUser: (UiMessage) -> Unit,
-    onSwitchBranch: (UiMessage, Int) -> Unit
+    onSwitchBranch: (UiMessage, Int) -> Unit,
+    loadImageBytes: (String) -> ByteArray?
 ) {
     when (message.kind) {
-        UiMessageKind.User -> UserBubble(message, onEditUser, onSwitchBranch)
+        UiMessageKind.User -> UserBubble(message, onEditUser, onSwitchBranch, loadImageBytes)
         UiMessageKind.Assistant -> AssistantText(message)
         UiMessageKind.ToolActivity -> ToolActivityItem(message, expanded, onToggleExpand)
         UiMessageKind.Steer -> CenterPill(prefix = "转向", text = message.text)
@@ -122,7 +186,8 @@ private fun MessageItem(
 private fun UserBubble(
     message: UiMessage,
     onEditUser: (UiMessage) -> Unit,
-    onSwitchBranch: (UiMessage, Int) -> Unit
+    onSwitchBranch: (UiMessage, Int) -> Unit,
+    loadImageBytes: (String) -> ByteArray?
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -138,12 +203,23 @@ private fun UserBubble(
                     onLongClick = { onEditUser(message) }
                 )
         ) {
-            Text(
-                text = message.text,
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-            )
+            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                // v1.8: uploads render compactly inside the bubble. v1.9: images are thumbnails (like GPT/Gemini),
+                // documents stay as one-line chips -- re-printing 40k characters would bury the conversation.
+                if (message.attachments.isNotEmpty()) {
+                    message.attachments.forEach { attachment ->
+                        AttachmentTile(attachment, loadImageBytes)
+                        Spacer(Modifier.size(4.dp))
+                    }
+                }
+                if (message.text.isNotBlank()) {
+                    Text(
+                        text = message.text,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                }
+            }
         }
         // Branch navigation (VSCode-Copilot style): after an edit-and-resend, several prompt branches appear at the same position.
         if (message.branchCount > 1) {
@@ -178,6 +254,37 @@ private fun UserBubble(
                     )
                 }
             }
+        }
+    }
+}
+
+/**
+ * One upload inside a user bubble: an image renders as a thumbnail (the mainstream chat look), a
+ * document stays a one-line chip (its value is the extracted text, which must not fill the bubble).
+ */
+@Composable
+private fun AttachmentTile(attachment: UiAttachment, loadImageBytes: (String) -> ByteArray?) {
+    if (attachment.image) {
+        AttachmentThumb(
+            imageId = attachment.imageId,
+            name = attachment.name,
+            loadBytes = loadImageBytes,
+            size = 88.dp
+        )
+    } else {
+        val label = "文档 · ${attachment.name}" + if (attachment.truncated) " · 已截断" else ""
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.10f)
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+            )
         }
     }
 }

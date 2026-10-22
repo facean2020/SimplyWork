@@ -13,6 +13,7 @@ graph LR
         SC["session-core<br/>(DAG/Tree/Room)"]
         SE["skill-engine<br/>(Registry/Pmp)"]
         TC["tool-core<br/>(Reg/Exec/Hook)"]
+        AT["attachment<br/>(Kinds/Sizing/Extractor)"]
     end
 
     subgraph Infra["基础提供层 (Infrastructure)"]
@@ -20,6 +21,7 @@ graph LR
         MP["model-provider<br/>(Cloud/Local/Tier)"]
         SB["sandbox<br/>(QuickJS/V8/Mem)"]
         AF["app-function<br/>(Intent/MCP)"]
+        MD["media<br/>(UploadLoader/Decode)"]
     end
 
     UI --> Core
@@ -29,7 +31,11 @@ graph LR
     SE --> AF
     TC --> SB
     TC --> AF
+    AT --> MD
+    AC -.->|"附件随 UserPrompt 进 payload"| AT
 ```
+
+> 附件链路的完整设计（图片降采样 / 文档工厂分派 / 线上 parts 格式 / token 记账）见 [attachment-design.md](./attachment-design.md)。
 
 ---
 
@@ -95,6 +101,19 @@ graph LR
 
 
 
+**5. attachment（附件处理，纯逻辑）**
+
+用户上传的图片 / 文档在**进入 Agent Loop 之前**就转换完毕，因此这一层不改变循环时序，只是给 `Message.User` 多挂一个 `attachments` 字段。
+
+* `UploadOwner.kt`：**上传缝（interface）**。`suspend fun load(uri, name): Result<PendingUpload>`；真实实现在基础层 `media`，ViewModel 只依赖此接口，附件逻辑因此可在 JVM 单测中用假实现替换。
+* `UploadKinds.kt`：**格式分派（纯）**。MIME 优先、扩展名兜底，`null` = 明确不接受——不支持的文件在选完那一刻就报错，不静默附加。
+* `ImageSizing.kt`：**尺寸计算（纯）**。降采样因子与目标宽高，长边上限 1568px。
+* `DocumentExtraction.kt` / `DocumentExtractorFactory.kt`：**文档提取工厂**。`firstOrNull { it.supports(doc) }` 先注册者优先；三种结局 `Success / Unsupported / Failed`，把"格式还没有 provider"与"内容读不出来"分开。
+* `PlainTextDocumentExtractor.kt`：**当前唯一 provider（txt/md）**。UTF-8 + 去 BOM + NUL 字节判二进制 + 40k 字符截断（不切断 surrogate pair）。加 pdf/word = 一个实现 + `defaults()` 一行，UI / ViewModel / Loop 全不动。
+* `PendingUpload.kt` / `PromptUploads`：**待发送态 → `List<Attachment>` 映射**，以及 token 估算（文档走估算器，图片按 `IMAGE_TOKEN_ESTIMATE = 1200`/张）。
+
+
+
 ---
 
 ### 基础提供层组件设计
@@ -131,6 +150,16 @@ graph LR
 
 
 
+**4. media（附件读取落地）**
+
+`core.attachment.UploadOwner` 的真实实现，唯一接触 Android API 的一层：
+
+* `AndroidUploadLoader.kt`：**`content://` URI → 模型可消费的 payload**。解析 `DISPLAY_NAME` / MIME，再按 `UploadKinds` 分派：
+  * **图片**：读字节（32 MB 闸门）→ `inJustDecodeBounds` 只取宽高 → `inSampleSize` 降采样解码 → 缩到长边 1568 → `WEBP_LOSSY` q85（保 alpha）→ 写入 `ImageBlobStore`（`filesDir/agent/images/<id>.webp`）。**降采样是成本约束不是打磨**：请求时才 base64 进 `data:` URL 且每轮重发；JSONL 只落 `{id, mimeType, name}` 引用。
+  * **文档**：读字节 → `DocumentExtractorFactory.extract()` → `Attachment.Document(name, text, truncated)`。
+
+
+
 ---
 
 ### UI 交互层组件设计 (`:feature:ui`)
@@ -163,8 +192,11 @@ class AgentLoopCoordinator(
     private val toolExecutor: ToolExecutor, // tool-core：统一工具注册与执行内核
     private val disclosure: ProgressiveDisclosure // 渐进式披露驱动（Skill 二级工具）
 ) {
-    suspend fun executeLoop(initialPrompt: String): Flow<AgentStepEvent> = flow {
-        queueManager.enqueueUserPrompt(initialPrompt)
+    suspend fun executeLoop(
+        initialPrompt: String,
+        attachments: List<Attachment> = emptyList() // v1.8：图片 / 已提取文本的文档，随本轮 UserPrompt 走
+    ): Flow<AgentStepEvent> = flow {
+        queueManager.enqueueUserPrompt(initialPrompt, attachments)
 
         while (true) {
             // 1. Check Message Queue (Steering and Follow-up)
@@ -175,6 +207,7 @@ class AgentLoopCoordinator(
             val compactedContext = compactor.compactIfNeeded(promptContext)
             
             // 5 & 6 & 7. Convert format and Send to LLM
+            // （有附件时 content 从字符串变成 parts 数组：text + image_url / 文档文本 part）
             val payload = compactedContext.toModelPayload()
             val response = modelProvider.generate(payload)
             emit(AgentStepEvent.ModelResponse(response))

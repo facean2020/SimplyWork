@@ -1,5 +1,6 @@
 package com.yangz3720.simplywork.ui.agent
 
+import com.yangz3720.simplywork.core.attachment.PendingUpload
 import com.yangz3720.simplywork.core.cloud.CloudFolder
 import com.yangz3720.simplywork.core.cloud.OneDriveAccount
 import com.yangz3720.simplywork.core.cloud.SyncState
@@ -39,7 +40,27 @@ data class UiMessage(
      * v1.5: what this tool call did to workspace files (fs_write/fs_move/fs_delete).
      * Attached by [ConversationRenderer] keyed by toolCallId, rendered under the tool entry as a diff card.
      */
-    val fileChange: FileChange? = null
+    val fileChange: FileChange? = null,
+
+    /**
+     * v1.8: uploads that belonged to this user turn (images / extracted documents).
+     * Rendered as chips inside the bubble, so a document is one line rather than 40k characters of transcript.
+     * A display projection only -- see [UiAttachment].
+     */
+    val attachments: List<UiAttachment> = emptyList()
+)
+
+/**
+ * One user upload as the conversation shows it: name + kind, plus [imageId] so the bubble can draw a
+ * thumbnail from `ImageBlobStore`. The image bytes and the document text stay out of Compose state --
+ * only the blob key rides along, and the bitmap is decoded (downsampled) while the row is on screen.
+ */
+data class UiAttachment(
+    val name: String,
+    val image: Boolean,
+    val truncated: Boolean = false,
+    /** Blob key of the WebP in `ImageBlobStore` (images only); null when the reference is gone. */
+    val imageId: String? = null
 )
 
 enum class UiMessageKind {
@@ -139,6 +160,19 @@ data class AgentUiState(
      */
     val autoApproveNonDestructive: Boolean = true,
 
+    /** v1.8: uploads picked but not sent yet -- the chips above the input bar. */
+    val pendingUploads: List<PendingUpload> = emptyList(),
+    /** v1.8: a picked file is being read / decoded right now. */
+    val uploadBusy: Boolean = false,
+    /** v1.8: why the last pick was rejected (unsupported format / unreadable), shown next to the chips. */
+    val uploadError: String? = null,
+
+    /**
+     * v1.9: whether the selected model accepts image input. Gates the "图片" entry in the attach sheet -- offering it
+     * for a text-only model only leads to a rejected request after the user has already picked a file.
+     */
+    val activeModelSupportsVision: Boolean = false,
+
     /**
      * v1.1: the current model's context budget + where it came from (the settings page shows it faithfully, see `ContextBudgetPlan`).
      */
@@ -149,6 +183,13 @@ data class AgentUiState(
      * That is the real "current context usage"; a cumulative total only grows monotonically and cannot tell you whether compaction is due.
      */
     val contextPromptTokens: Int = 0,
+
+    /**
+     * Streaming assistant text in flight (null = no active model turn).
+     * Assembled from [com.yangz3720.simplywork.core.agent.AgentStepEvent.AssistantTextDelta] and cleared
+     * when the turn lands in the persisted projection ([AgentStepEvent.ModelTurn] / Completed / Failed).
+     */
+    val streamingText: String? = null,
 
     val modelConfigured: Boolean = true
 )

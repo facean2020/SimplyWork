@@ -1,6 +1,6 @@
 # Agent Core 设计（会话状态树 + 记忆分层 + Agent Loop）
 
-> **状态**：设计基线 v1.0（2026-08-31，已实现）；UI 阶段增量 v1.1（2026-09-10，已实现）
+> **状态**：设计基线 v1.0（2026-08-31，已实现）；UI 阶段增量 v1.1（2026-09-10，已实现）；附件增量 v1.8（图片 / 文档，已实现 —— 见 `attachment-design.md`）
 > **上游文档**：`architecture.md`（Core 核心控制层）/ `android-agent.md`（§5.4 Steer-capable Loop）/ `appfunction-design.md` v1.1（systemops 工具来源）
 > **本文档关系**：细化 `architecture.md` 中「Core 核心控制层」的 agent-core + session-core 两块，作为本轮实现的唯一设计依据。与 `architecture.md` 冲突之处**以本文为准**（差异见 §12）。
 > **实现状态**：**已实现**（包 `core.agent` / `core.session` / `core.AgentRuntime`；JVM 单测 49 项通过，全工程 84 项）。UI 阶段增量：包 `ui.agent` / `ui.settings` / `AppContainer`（Q1 HITL 弹窗、Q2 循环外层重启、多会话已落地；全工程 JVM 102 项）。
@@ -141,6 +141,7 @@ enum class SessionNodeStatus { pending, success, failed, abandoned }
 - **`ToolCall` 承载完整 assistant 回合**——含工具调用时必然是本类型；模型**纯文本最终回答**（无工具调用）也落 `ToolCall` 节点（nodeType 枚举保持用户规格的六值不变，payload 内 `toolCalls: []` 表达差异）。它在该轮的 DAG 语义就是「模型输出节点」。
 - **`Steer` 是用户输入**：组装时转 `Message.User`（模型把 user 角色视为最高优先级插入意图，符合转向语义）。
 - **`SystemPrompt(kind=follow_up)` 是系统自愈追问**（CompletionGuard / 审计拒绝后的引导），组装时转 `Message.User` + `[system follow-up]` 前缀——以用户口吻注入保证所有 OpenAI 兼容端点的接受度。
+- **附件（v1.8）挂在 `UserPrompt` payload 里，不新增节点类型**：`Message.User` 除 `content` 外还带 `attachments: List<Attachment>`（`Image` = blob 引用（`id`/`mimeType`/`name`，字节在 `ImageBlobStore`，v1.9），`Document` = 已提取文本 + `truncated`）。因为附件是 payload 内字段而非独立节点，分支、编辑重发、压缩收编、token 汇总全部自动兼容；`AgentContextAssembler` 必须显式透传 `user.attachments`，否则纯附件轮会变成空 prompt（曾经的真实 bug）。完整设计见 [`attachment-design.md`](./attachment-design.md)。
 
 ### 3.2 状态机
 
