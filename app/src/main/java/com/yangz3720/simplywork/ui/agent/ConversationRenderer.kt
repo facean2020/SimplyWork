@@ -142,9 +142,13 @@ object ConversationRenderer {
         }
     }
 
-    /** Payload → display: the name is all the transcript needs; images and documents differ only in the label. */
+    /** Payload → display: images carry their blob id for the thumbnail; documents are name-only chips. */
     private fun toUiAttachment(attachment: Attachment): UiAttachment = when (attachment) {
-        is Attachment.Image -> UiAttachment(name = attachment.name ?: "已上传", image = true)
+        is Attachment.Image -> UiAttachment(
+            name = attachment.name ?: "已上传",
+            image = true,
+            imageId = attachment.id
+        )
         is Attachment.Document -> UiAttachment(name = attachment.name, image = false, truncated = attachment.truncated)
     }
 

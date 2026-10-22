@@ -59,12 +59,17 @@ sealed interface Message {
 @Serializable
 sealed interface Attachment {
 
-    /** An uploaded image. [name] is the original file name -- kept for the transcript, never sent to the provider. */
+    /**
+     * An uploaded image held by reference (v1.9): [id] keys a binary WebP blob in
+     * `ImageBlobStore`, never base64 in the JSONL. Bytes are loaded and base64-encoded only
+     * when a model request is formatted. [name] is the original file name -- kept for the
+     * transcript, never sent to the provider.
+     */
     @Serializable
     @SerialName("image")
     data class Image(
+        val id: String,
         val mimeType: String,
-        val base64Data: String,
         val name: String? = null
     ) : Attachment
 

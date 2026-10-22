@@ -276,7 +276,8 @@ fun AgentScreen(
                         )
                     },
                     onAddDocument = { pickDocument.launch(arrayOf("*/*")) },
-                    onRemoveUpload = { viewModel.removeUpload(it) }
+                    onRemoveUpload = { viewModel.removeUpload(it) },
+                    loadImageBytes = { viewModel.loadImageBytes(it) }
                 )
             }
         ) { innerPadding ->
@@ -294,7 +295,8 @@ fun AgentScreen(
                         ConversationList(
                             messages = state.messages,
                             onEditUser = startEdit,
-                            onSwitchBranch = { message, direction -> viewModel.switchBranch(message.id, direction) }
+                            onSwitchBranch = { message, direction -> viewModel.switchBranch(message.id, direction) },
+                            loadImageBytes = { viewModel.loadImageBytes(it) }
                         )
                     }
                 }

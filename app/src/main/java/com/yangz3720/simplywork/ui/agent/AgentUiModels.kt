@@ -51,14 +51,16 @@ data class UiMessage(
 )
 
 /**
- * One user upload as the conversation shows it: name + kind. The base64 payload and the document text stay in
- * the session store -- putting them into Compose state would keep every uploaded image alive for the whole
- * session just to draw a one-line chip.
+ * One user upload as the conversation shows it: name + kind, plus [imageId] so the bubble can draw a
+ * thumbnail from `ImageBlobStore`. The image bytes and the document text stay out of Compose state --
+ * only the blob key rides along, and the bitmap is decoded (downsampled) while the row is on screen.
  */
 data class UiAttachment(
     val name: String,
     val image: Boolean,
-    val truncated: Boolean = false
+    val truncated: Boolean = false,
+    /** Blob key of the WebP in `ImageBlobStore` (images only); null when the reference is gone. */
+    val imageId: String? = null
 )
 
 enum class UiMessageKind {

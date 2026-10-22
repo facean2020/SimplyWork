@@ -5,9 +5,9 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.provider.OpenableColumns
-import android.util.Base64
 import com.yangz3720.simplywork.core.attachment.DocumentExtraction
 import com.yangz3720.simplywork.core.attachment.DocumentExtractorFactory
+import com.yangz3720.simplywork.core.attachment.ImageBlobStore
 import com.yangz3720.simplywork.core.attachment.ImageSizing
 import com.yangz3720.simplywork.core.attachment.PendingUpload
 import com.yangz3720.simplywork.core.attachment.UploadDocument
@@ -27,7 +27,8 @@ import kotlinx.coroutines.withContext
  * The real [UploadOwner] (v1.8): `content://` URI → what the model can consume.
  *
  * Two paths only, and the split is [UploadKinds]' decision, not this class's:
- * - image  → decoded at a bounded size and re-encoded ([ImageSizing]) so the payload stays cheap to resend;
+ * - image  → decoded at a bounded size and re-encoded ([ImageSizing]) into a WebP blob under
+ *   [imageBlobs]; the session payload only carries the blob id, so JSONL stays small;
  * - document → bytes go to [DocumentExtractorFactory], which picks the format provider (txt/md today).
  *
  * Nothing here knows a document format: adding pdf/word is a new provider in the factory, and this file does
@@ -37,6 +38,7 @@ import kotlinx.coroutines.withContext
  */
 class AndroidUploadLoader(
     context: Context,
+    private val imageBlobs: ImageBlobStore,
     private val factory: DocumentExtractorFactory = DocumentExtractorFactory(),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : UploadOwner {
@@ -55,6 +57,10 @@ class AndroidUploadLoader(
                 UploadException("暂不支持「$displayName」这种格式，目前支持图片和 txt / md 文档")
             )
         }
+    }
+
+    override suspend fun release(uploadId: String) {
+        withContext(ioDispatcher) { imageBlobs.delete(uploadId) }
     }
 
     private fun prepareImage(uri: Uri, name: String): Result<PendingUpload> {
@@ -86,15 +92,19 @@ class AndroidUploadLoader(
             bitmap.compress(Bitmap.CompressFormat.WEBP_LOSSY, WEBP_QUALITY, encoded)
             if (bitmap !== decoded) bitmap.recycle()
             val bytes = encoded.toByteArray()
+            val id = UUID.randomUUID().toString()
+            // Blob first, payload later: a crash between the two orphans a file instead of leaving a
+            // session that points at bytes that never landed.
+            imageBlobs.save(id, bytes)
             Result.success(
                 PendingUpload(
-                    id = UUID.randomUUID().toString(),
+                    id = id,
                     name = name,
                     kind = UploadKind.Image,
                     sizeBytes = bytes.size.toLong(),
                     image = Attachment.Image(
+                        id = id,
                         mimeType = WEBP_MIME,
-                        base64Data = Base64.encodeToString(bytes, Base64.NO_WRAP),
                         name = name
                     )
                 )

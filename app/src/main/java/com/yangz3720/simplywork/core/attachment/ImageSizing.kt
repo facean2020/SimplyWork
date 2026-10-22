@@ -3,9 +3,9 @@ package com.yangz3720.simplywork.core.attachment
 /**
  * Model-ready image sizing (pure, so it is JVM-testable; the Bitmap half lives in `infrastructure/media`).
  *
- * The long edge is capped at [MAX_EDGE] because the bytes of an upload are not transient: the base64 payload is
- * persisted in the session JSONL and re-sent with every later turn, so a 12 MP camera photo (3-6 MB → ~8 MB
- * base64) would be paid for on every request. [MAX_EDGE] is the size vision models tile at anyway.
+ * The long edge is capped at [MAX_EDGE] because the bytes of an upload are not transient: the WebP blob is
+ * stored in [ImageBlobStore] and re-sent (base64) with every later turn, so a 12 MP camera photo (3-6 MB →
+ * ~8 MB base64) would be paid for on every request. [MAX_EDGE] is the size vision models tile at anyway.
  */
 object ImageSizing {
 

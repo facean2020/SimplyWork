@@ -1,5 +1,6 @@
 package com.yangz3720.simplywork.infrastructure.model.client
 
+import com.yangz3720.simplywork.core.attachment.ImageBlobStore
 import com.yangz3720.simplywork.infrastructure.error.InfrastructureException
 import com.yangz3720.simplywork.infrastructure.model.ModelInfo
 import com.yangz3720.simplywork.infrastructure.model.ModelPricing
@@ -18,6 +19,7 @@ import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.utils.io.*
+import java.util.Base64
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.serialization.json.*
@@ -25,10 +27,15 @@ import kotlinx.serialization.json.*
 /**
  * Universal OpenAI-compatible Model Provider client.
  * Supports OpenAI, DeepSeek, Ollama, vLLM, and any OpenAI Chat Completions compatible endpoint.
+ *
+ * [imageBlobs] resolves an [Attachment.Image] reference to raw bytes at request-format time:
+ * the session JSONL never holds base64, so the bytes are loaded (and base64-encoded for the
+ * `data:` URL) only for the request that actually needs them.
  */
 class OpenAiCompatibleClient(
     val config: ModelConfig,
-    httpClient: HttpClient? = null
+    httpClient: HttpClient? = null,
+    private val imageBlobs: ImageBlobStore? = null
 ) : ModelProvider {
 
     private val json = Json {
@@ -507,12 +514,23 @@ class OpenAiCompatibleClient(
                         message.attachments.forEach { att ->
                             when (att) {
                                 is Attachment.Image -> {
-                                    add(buildJsonObject {
-                                        put("type", "image_url")
-                                        put("image_url", buildJsonObject {
-                                            put("url", "data:${att.mimeType};base64,${att.base64Data}")
+                                    // Bytes are loaded here, not from the payload: the JSONL holds only the
+                                    // blob id. A missing blob is reported as text so the turn stays coherent
+                                    // instead of failing the whole request.
+                                    val bytes = imageBlobs?.read(att.id)
+                                    if (bytes != null) {
+                                        add(buildJsonObject {
+                                            put("type", "image_url")
+                                            put("image_url", buildJsonObject {
+                                                put("url", "data:${att.mimeType};base64,${Base64.getEncoder().encodeToString(bytes)}")
+                                            })
                                         })
-                                    })
+                                    } else {
+                                        add(buildJsonObject {
+                                            put("type", "text")
+                                            put("text", "[图片已丢失：${att.name ?: "未命名"}]")
+                                        })
+                                    }
                                 }
                                 // Documents are already text: one labelled part. The label is what lets the model
                                 // tell two uploaded files apart -- the text itself carries no file boundary.

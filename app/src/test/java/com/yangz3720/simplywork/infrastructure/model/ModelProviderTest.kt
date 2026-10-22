@@ -1,5 +1,6 @@
 package com.yangz3720.simplywork.infrastructure.model
 
+import com.yangz3720.simplywork.core.attachment.InMemoryImageBlobStore
 import com.yangz3720.simplywork.infrastructure.model.client.OpenAiCompatibleClient
 import com.yangz3720.simplywork.infrastructure.model.config.ModelConfig
 import com.yangz3720.simplywork.infrastructure.model.model.*
@@ -8,6 +9,7 @@ import io.ktor.client.*
 import io.ktor.client.engine.mock.*
 import io.ktor.client.plugins.contentnegotiation.*
 import io.ktor.http.*
+import io.ktor.http.content.TextContent
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.utils.io.*
 import kotlinx.coroutines.flow.toList
@@ -530,5 +532,78 @@ class ModelProviderTest {
         assertEquals(12, usage.cachedTokens)
         // and no cost field anywhere -> stays null rather than being estimated
         assertNull(usage.costUsd)
+    }
+
+    @Test
+    fun testImageAttachmentsAreHydratedFromTheBlobStoreIntoDataUrls() = runTest {
+        val raw = byteArrayOf(0x52, 0x49, 0x46, 0x46) // "RIFF"
+        val blobs = InMemoryImageBlobStore().apply { save("img-1", raw) }
+        var sentBody = ""
+        val mockEngine = MockEngine { request ->
+            sentBody = (request.body as TextContent).text
+            respond(
+                content = ByteReadChannel(
+                    """{"id":"x","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"""
+                ),
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json")
+            )
+        }
+        val client = OpenAiCompatibleClient(
+            ModelConfig(baseUrl = "https://api.example.com/v1", apiKey = "sk", defaultModel = "m"),
+            HttpClient(mockEngine) { install(ContentNegotiation) { json(json) } },
+            imageBlobs = blobs
+        )
+
+        client.generate(
+            ModelRequest(
+                messages = listOf(
+                    Message.User(
+                        content = "看看这张图",
+                        attachments = listOf(Attachment.Image(id = "img-1", mimeType = "image/webp", name = "cat.webp"))
+                    )
+                )
+            )
+        )
+
+        // The JSONL holds only the id; the bytes are base64-encoded here, at request-format time.
+        val expected = java.util.Base64.getEncoder().encodeToString(raw)
+        assertTrue(sentBody.contains("\"type\":\"image_url\""))
+        assertTrue(sentBody.contains("data:image/webp;base64,$expected"))
+    }
+
+    @Test
+    fun testMissingImageBlobBecomesAnExplicitTextNoteRatherThanAFailedRequest() = runTest {
+        var sentBody = ""
+        val mockEngine = MockEngine { request ->
+            sentBody = (request.body as TextContent).text
+            respond(
+                content = ByteReadChannel(
+                    """{"id":"x","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"""
+                ),
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json")
+            )
+        }
+        val client = OpenAiCompatibleClient(
+            ModelConfig(baseUrl = "https://api.example.com/v1", apiKey = "sk", defaultModel = "m"),
+            HttpClient(mockEngine) { install(ContentNegotiation) { json(json) } },
+            imageBlobs = InMemoryImageBlobStore()
+        )
+
+        val result = client.generate(
+            ModelRequest(
+                messages = listOf(
+                    Message.User(
+                        content = "看图",
+                        attachments = listOf(Attachment.Image(id = "gone", mimeType = "image/webp", name = "cat.webp"))
+                    )
+                )
+            )
+        )
+
+        assertTrue(result.isSuccess)
+        assertFalse(sentBody.contains("image_url"))
+        assertTrue(sentBody.contains("图片已丢失"))
     }
 }

@@ -15,6 +15,8 @@ import com.yangz3720.simplywork.core.agent.tool.AgentSelfConfig
 import com.yangz3720.simplywork.core.agent.tool.ScriptTools
 import com.yangz3720.simplywork.core.agent.tool.SelfOpsTools
 import com.yangz3720.simplywork.core.agent.tool.TtsTool
+import com.yangz3720.simplywork.core.attachment.FileImageBlobStore
+import com.yangz3720.simplywork.core.attachment.ImageBlobStore
 import com.yangz3720.simplywork.core.attachment.UploadOwner
 import com.yangz3720.simplywork.core.cloud.OneDriveOwner
 import com.yangz3720.simplywork.core.session.ProjectStore
@@ -114,7 +116,16 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
      * Upload seam (v1.8): picked image / document → what the model can read. Resolves `content://` URIs and
      * dispatches documents through the extractor factory (txt/md today, pdf/word as new providers).
      */
-    val uploads: UploadOwner by lazy { AndroidUploadLoader(appContext) }
+    val uploads: UploadOwner by lazy { AndroidUploadLoader(appContext, imageBlobs) }
+
+    /**
+     * Image blobs (v1.9): raw WebP files keyed by id. Shared by the upload loader (write), the model
+     * client (read at request-format time) and the session repository (delete on session delete) --
+     * three consumers, one store.
+     */
+    val imageBlobs: ImageBlobStore by lazy {
+        FileImageBlobStore(File(appContext.filesDir, "agent/images"))
+    }
 
     /**
      * OneDrive integration (v1.4): lazy wiring -- no network or MSAL initialization, only object
@@ -420,7 +431,8 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
                     TtsTool.registeredTool(appContext, workspace, projectStore)
             },
             soul = soul,
-            workspace = workspace
+            workspace = workspace,
+            imageBlobs = imageBlobs
         )
 
     /**
@@ -470,7 +482,8 @@ class AppContainer(context: Context) : AgentRuntimeOwner {
             ?: ModelVisionTable.supports(state.activeModel)
     }
 
-    private fun createProvider(config: ModelConfig): ModelProvider = OpenAiCompatibleClient(config)
+    private fun createProvider(config: ModelConfig): ModelProvider =
+        OpenAiCompatibleClient(config, imageBlobs = imageBlobs)
     private companion object {
         const val PREFS_NAME = "simplywork"
 

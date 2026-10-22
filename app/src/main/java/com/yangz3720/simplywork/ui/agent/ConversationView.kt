@@ -65,7 +65,9 @@ fun ConversationList(
     messages: List<UiMessage>,
     modifier: Modifier = Modifier,
     onEditUser: (UiMessage) -> Unit = {},
-    onSwitchBranch: (UiMessage, Int) -> Unit = { _, _ -> }
+    onSwitchBranch: (UiMessage, Int) -> Unit = { _, _ -> },
+    /** Resolves an image blob id to raw bytes for attachment thumbnails (null = no store wired). */
+    loadImageBytes: (String) -> ByteArray? = { null }
 ) {
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
     val expanded = remember { mutableStateMapOf<String, Boolean>() }
@@ -90,7 +92,8 @@ fun ConversationList(
                     expanded[key] = !(expanded[key] ?: false)
                 },
                 onEditUser = onEditUser,
-                onSwitchBranch = onSwitchBranch
+                onSwitchBranch = onSwitchBranch,
+                loadImageBytes = loadImageBytes
             )
         }
     }
@@ -102,10 +105,11 @@ private fun MessageItem(
     expanded: Boolean,
     onToggleExpand: () -> Unit,
     onEditUser: (UiMessage) -> Unit,
-    onSwitchBranch: (UiMessage, Int) -> Unit
+    onSwitchBranch: (UiMessage, Int) -> Unit,
+    loadImageBytes: (String) -> ByteArray?
 ) {
     when (message.kind) {
-        UiMessageKind.User -> UserBubble(message, onEditUser, onSwitchBranch)
+        UiMessageKind.User -> UserBubble(message, onEditUser, onSwitchBranch, loadImageBytes)
         UiMessageKind.Assistant -> AssistantText(message)
         UiMessageKind.ToolActivity -> ToolActivityItem(message, expanded, onToggleExpand)
         UiMessageKind.Steer -> CenterPill(prefix = "转向", text = message.text)
@@ -122,7 +126,8 @@ private fun MessageItem(
 private fun UserBubble(
     message: UiMessage,
     onEditUser: (UiMessage) -> Unit,
-    onSwitchBranch: (UiMessage, Int) -> Unit
+    onSwitchBranch: (UiMessage, Int) -> Unit,
+    loadImageBytes: (String) -> ByteArray?
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -139,11 +144,11 @@ private fun UserBubble(
                 )
         ) {
             Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                // v1.8: uploads are shown as chips, not as their payload -- an extracted document is prompt
-                // text for the model, but re-printing 40k characters into the transcript buries the conversation.
+                // v1.8: uploads render compactly inside the bubble. v1.9: images are thumbnails (like GPT/Gemini),
+                // documents stay as one-line chips -- re-printing 40k characters would bury the conversation.
                 if (message.attachments.isNotEmpty()) {
                     message.attachments.forEach { attachment ->
-                        AttachmentChip(attachment)
+                        AttachmentTile(attachment, loadImageBytes)
                         Spacer(Modifier.size(4.dp))
                     }
                 }
@@ -194,25 +199,33 @@ private fun UserBubble(
 }
 
 /**
- * One upload inside a user bubble: the file name is the whole story, so that is all that is shown.
- * An upload-only turn renders as chips alone -- the bubble must not show an empty body.
+ * One upload inside a user bubble: an image renders as a thumbnail (the mainstream chat look), a
+ * document stays a one-line chip (its value is the extracted text, which must not fill the bubble).
  */
 @Composable
-private fun AttachmentChip(attachment: UiAttachment) {
-    val prefix = if (attachment.image) "图片" else "文档"
-    val label = "$prefix · ${attachment.name}" + if (attachment.truncated) " · 已截断" else ""
-    Surface(
-        shape = RoundedCornerShape(8.dp),
-        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.10f)
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onPrimaryContainer,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+private fun AttachmentTile(attachment: UiAttachment, loadImageBytes: (String) -> ByteArray?) {
+    if (attachment.image) {
+        AttachmentThumb(
+            imageId = attachment.imageId,
+            name = attachment.name,
+            loadBytes = loadImageBytes,
+            size = 88.dp
         )
+    } else {
+        val label = "文档 · ${attachment.name}" + if (attachment.truncated) " · 已截断" else ""
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.10f)
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+            )
+        }
     }
 }
 

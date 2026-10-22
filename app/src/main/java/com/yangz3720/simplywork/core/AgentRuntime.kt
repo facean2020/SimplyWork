@@ -18,6 +18,8 @@ import com.yangz3720.simplywork.core.agent.tool.RegisteredTool
 import com.yangz3720.simplywork.core.agent.tool.SystemOpsToolAdapter
 import com.yangz3720.simplywork.core.agent.tool.TodoTool
 import com.yangz3720.simplywork.core.agent.tool.WaitTool
+import com.yangz3720.simplywork.core.attachment.FileImageBlobStore
+import com.yangz3720.simplywork.core.attachment.ImageBlobStore
 import com.yangz3720.simplywork.core.session.SessionRepository
 import com.yangz3720.simplywork.core.session.SessionRepositoryImpl
 import com.yangz3720.simplywork.core.session.store.JsonlPayloadStore
@@ -49,6 +51,10 @@ class AgentRuntime private constructor(
         /**
          * Production wiring: SQLite structure store + JSONL payload store under
          * `filesDir/agent/`. [provider] and [router] come from the infrastructure layer.
+         *
+         * [imageBlobs] is the binary image store shared with the upload loader and the model
+         * client (same instance, or session deletes will miss blobs and requests will not find
+         * them). Defaults to `filesDir/agent/images/` when the caller does not own one.
          */
         fun create(
             context: Context,
@@ -59,12 +65,18 @@ class AgentRuntime private constructor(
             approvalHandler: AuditApprovalHandler = AuditApprovalHandler.AutoApprove,
             selfOps: ((repository: SessionRepository) -> List<RegisteredTool>)? = null,
             workspace: AgentWorkspace,
-            soul: AgentSoul
+            soul: AgentSoul,
+            imageBlobs: ImageBlobStore? = null
         ): AgentRuntime {
             val baseDir = File(context.filesDir, "agent").apply { mkdirs() }
             val structureStore: SessionStore = SqliteSessionStore(context, "sessions.db")
             val payloadStore = JsonlPayloadStore(File(baseDir, "payloads"))
-            return createWithStores(structureStore, payloadStore, provider, router, config, estimator, approvalHandler = approvalHandler, selfOps = selfOps, workspace = workspace, soul = soul)
+            val blobs = imageBlobs ?: FileImageBlobStore(File(baseDir, "images"))
+            return createWithStores(
+                structureStore, payloadStore, provider, router, config, estimator,
+                approvalHandler = approvalHandler, selfOps = selfOps, workspace = workspace, soul = soul,
+                imageBlobs = blobs
+            )
         }
 
         /**
@@ -84,9 +96,10 @@ class AgentRuntime private constructor(
             // changes to unit tests).
             selfOps: ((repository: SessionRepository) -> List<RegisteredTool>)? = null,
             workspace: AgentWorkspace,
-            soul: AgentSoul
+            soul: AgentSoul,
+            imageBlobs: ImageBlobStore? = null
         ): AgentRuntime {
-            val repository = SessionRepositoryImpl(structureStore, payloadStore)
+            val repository = SessionRepositoryImpl(structureStore, payloadStore, imageBlobs)
             val registry = AgentToolRegistry()
             SystemOpsToolAdapter.registerAll(registry, router)
             registry.register(TodoTool.registeredTool(repository))

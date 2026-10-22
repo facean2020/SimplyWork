@@ -14,6 +14,13 @@ interface UploadOwner {
 
     /** Loads one picked URI. [name] is the display name resolved by the caller (null = the loader resolves it). */
     suspend fun load(uri: String, name: String? = null): Result<PendingUpload>
+
+    /**
+     * Drops a picked-but-unsent upload's stored bytes (the image blob written at pick time).
+     * No-op when nothing was stored -- a document extraction holds no file. Sent uploads are
+     * never released: their blob is owned by the session payload that references it.
+     */
+    suspend fun release(uploadId: String) {}
 }
 
 /** An upload failure whose [message] is written for the user (unsupported format / undecodable / too large). */

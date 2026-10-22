@@ -58,15 +58,18 @@ class ConversationRendererTest {
                 messagePayload(
                     Message.User(
                         content = "",
-                        attachments = listOf(Attachment.Image(mimeType = "image/webp", base64Data = "AAAA", name = "cat.jpg"))
+                        attachments = listOf(Attachment.Image(id = "blob-1", mimeType = "image/webp", name = "cat.jpg"))
                     )
                 )
             }
         )
 
-        // An upload-only turn shows chips and no body: the bubble must not render an empty text block.
+        // An upload-only turn shows its thumbnail and no body: the bubble must not render an empty text block.
         assertEquals("", messages[0].text)
-        assertEquals(UiAttachment(name = "cat.jpg", image = true), messages[0].attachments.single())
+        assertEquals(
+            UiAttachment(name = "cat.jpg", image = true, imageId = "blob-1"),
+            messages[0].attachments.single()
+        )
     }
 
     @Test

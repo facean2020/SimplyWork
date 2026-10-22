@@ -503,7 +503,7 @@ class AgentViewModelTest {
 
     @Test
     fun `an upload-only turn is a valid message and names the session after the file`() {
-        val image = Attachment.Image(mimeType = "image/webp", base64Data = "AAAA", name = "cat.jpg")
+        val image = Attachment.Image(id = "blob-1", mimeType = "image/webp", name = "cat.jpg")
         val uploads = FakeUploads(
             Result.success(PendingUpload(id = "u1", name = "cat.jpg", kind = UploadKind.Image, image = image))
         )
@@ -516,8 +516,8 @@ class AgentViewModelTest {
 
         val user = vm.uiState.value.messages.first()
         assertEquals("", user.text)
-        // The transcript shows the file, not its base64: the payload stays in the session store.
-        assertEquals(UiAttachment(name = "cat.jpg", image = true), user.attachments.single())
+        // The transcript shows a thumbnail reference, not its bytes: the payload stays in the blob store.
+        assertEquals(UiAttachment(name = "cat.jpg", image = true, imageId = "blob-1"), user.attachments.single())
         assertEquals("cat.jpg", vm.uiState.value.currentTitle)
     }
 

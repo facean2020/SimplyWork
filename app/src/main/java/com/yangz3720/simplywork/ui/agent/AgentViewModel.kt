@@ -9,6 +9,7 @@ import com.yangz3720.simplywork.core.AgentRuntime
 import com.yangz3720.simplywork.core.agent.AgentStepEvent
 import com.yangz3720.simplywork.core.agent.ContextBudgetPlan
 import com.yangz3720.simplywork.core.agent.NodePayloads
+import com.yangz3720.simplywork.core.attachment.ImageBlobStore
 import com.yangz3720.simplywork.core.attachment.PendingUpload
 import com.yangz3720.simplywork.core.attachment.PromptUploads
 import com.yangz3720.simplywork.core.attachment.UploadOwner
@@ -132,6 +133,8 @@ class AgentViewModel(
     private val externalPreview: ExternalPreview,
     /** Upload seam (v1.8): a picked image / document becomes something the model can read. */
     private val uploads: UploadOwner,
+    /** v1.9: binary image store, shared with the upload loader and the request formatter (thumbnails read from it). */
+    private val imageBlobs: ImageBlobStore? = null,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : ViewModel() {
 
@@ -642,7 +645,17 @@ class AgentViewModel(
         _uiState.update { state ->
             state.copy(pendingUploads = state.pendingUploads.filterNot { it.id == uploadId })
         }
+        // The image blob was written at pick time and is not yet referenced by any session:
+        // release it now or the file would sit there unreferenced forever.
+        viewModelScope.launch(ioDispatcher) { uploads.release(uploadId) }
     }
+
+    /**
+     * Raw WebP bytes for a blob id (v1.9 thumbnails). Runs on the caller's dispatcher -- the Compose
+     * side already wraps this in `Dispatchers.IO` (see `rememberImageThumb`). Null when no store is
+     * wired or the blob is gone; the thumb then falls back to its placeholder.
+     */
+    fun loadImageBytes(imageId: String): ByteArray? = imageBlobs?.read(imageId)
 
     fun dismissUploadError() {
         _uiState.update { it.copy(uploadError = null) }

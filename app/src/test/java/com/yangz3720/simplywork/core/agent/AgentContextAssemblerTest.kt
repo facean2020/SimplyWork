@@ -113,7 +113,7 @@ class AgentContextAssemblerTest {
             Message.User(
                 content = "看看这张图",
                 attachments = listOf(
-                    Attachment.Image(mimeType = "image/webp", base64Data = "AAAA", name = "cat.jpg"),
+                    Attachment.Image(id = "blob-1", mimeType = "image/webp", name = "cat.jpg"),
                     Attachment.Document(name = "notes.md", text = "# 标题")
                 )
             )

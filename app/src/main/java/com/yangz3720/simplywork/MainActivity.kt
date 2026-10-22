@@ -29,7 +29,8 @@ class MainActivity : ComponentActivity() {
                         container.oneDrive,
                         container.projectFiles,
                         container.externalPreview,
-                        container.uploads
+                        container.uploads,
+                        container.imageBlobs
                     ) as T
             }
         )[AgentViewModel::class.java]

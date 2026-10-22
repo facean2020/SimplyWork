@@ -42,7 +42,7 @@ class UploadSizingTest {
 
     @Test
     fun `uploads become images and document text attachments`() {
-        val image = Attachment.Image(mimeType = "image/webp", base64Data = "AAAA", name = "cat.jpg")
+        val image = Attachment.Image(id = "blob-1", mimeType = "image/webp", name = "cat.jpg")
         val uploads = listOf(
             PendingUpload(id = "1", name = "cat.jpg", kind = UploadKind.Image, image = image),
             PendingUpload(id = "2", name = "notes.md", kind = UploadKind.Document, text = "# 标题", truncated = true),
