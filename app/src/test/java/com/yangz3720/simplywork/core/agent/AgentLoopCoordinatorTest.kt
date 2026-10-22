@@ -13,6 +13,7 @@ import com.yangz3720.simplywork.infrastructure.model.model.FinishReason
 import com.yangz3720.simplywork.infrastructure.model.model.Message
 import com.yangz3720.simplywork.infrastructure.model.model.ModelRequest
 import com.yangz3720.simplywork.infrastructure.model.model.ModelResponse
+import com.yangz3720.simplywork.infrastructure.model.model.ModelStreamChunk
 import com.yangz3720.simplywork.infrastructure.model.model.TokenUsage
 import com.yangz3720.simplywork.infrastructure.model.model.ToolCall
 import com.yangz3720.simplywork.infrastructure.systemops.SystemOperationRouter
@@ -48,7 +49,6 @@ class AgentLoopCoordinatorTest {
             return Result.success(queue.removeFirst())
         }
 
-        override fun generateStream(request: ModelRequest) = throw UnsupportedOperationException()
     }
 
     private fun response(text: String, toolCalls: List<ToolCall> = emptyList(), completionTokens: Int = 7) = ModelResponse(
@@ -204,7 +204,6 @@ class AgentLoopCoordinatorTest {
             override val supportedCapabilities = emptySet<ModelCapability>()
             override suspend fun generate(request: ModelRequest): Result<ModelResponse> =
                 Result.failure(IllegalStateException("connection reset"))
-            override fun generateStream(request: ModelRequest) = throw UnsupportedOperationException()
         }
         val agent = runtime(failing, AgentConfig())
         val session = agent.repository.createSession("t")
@@ -215,5 +214,33 @@ class AgentLoopCoordinatorTest {
         assertTrue((events.last() as AgentStepEvent.Failed).cause.message!!.contains("connection reset"))
         // No assistant node was persisted for the failed turn.
         assertTrue(agent.repository.activePath(session.id).none { it.nodeType == SessionNodeType.ToolCall })
+    }
+
+    @Test
+    fun `streaming text deltas surface before the assembled ModelTurn`() = runTest {
+        val streaming = object : ModelProvider {
+            override val providerId = "streaming"
+            override val supportedCapabilities = emptySet<ModelCapability>()
+            override suspend fun generate(request: ModelRequest): Result<ModelResponse> =
+                Result.success(response("Hello, stream!"))
+
+            override fun generateStream(request: ModelRequest) = kotlinx.coroutines.flow.flow {
+                emit(ModelStreamChunk.TextDelta("Hello, "))
+                emit(ModelStreamChunk.TextDelta("stream!"))
+                emit(ModelStreamChunk.Completed(FinishReason.STOP, response("Hello, stream!")))
+            }
+        }
+        val agent = runtime(streaming, AgentConfig())
+        val session = agent.repository.createSession("t")
+
+        val events = agent.coordinator.run(session.id, "hi").toList()
+
+        val deltas = events.filterIsInstance<AgentStepEvent.AssistantTextDelta>()
+        assertEquals(listOf("Hello, ", "stream!"), deltas.map { it.delta })
+        // Delta events precede the assembled turn, which still carries the full text for persistence.
+        val deltaIndex = events.indexOfFirst { it is AgentStepEvent.AssistantTextDelta }
+        val turnIndex = events.indexOfFirst { it is AgentStepEvent.ModelTurn }
+        assertTrue(deltaIndex in 0 until turnIndex)
+        assertEquals("Hello, stream!", (events[turnIndex] as AgentStepEvent.ModelTurn).text)
     }
 }

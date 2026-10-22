@@ -98,6 +98,17 @@ sealed interface AgentStepEvent {
         val completionTokens: Int
     ) : AgentStepEvent
 
+    /**
+     * Incremental assistant text while a model turn is still streaming (v2 streaming UI).
+     * Emitted per SSE delta; the UI throttles these for rendering.
+     * [ModelTurn] still arrives once at the end with the assembled turn.
+     */
+    data class AssistantTextDelta(
+        val sessionId: String,
+        val iteration: Int,
+        val delta: String
+    ) : AgentStepEvent
+
     data class ToolStarted(val toolName: String, val toolCallId: String) : AgentStepEvent
     data class ToolCompleted(val toolName: String, val toolCallId: String, val isError: Boolean) : AgentStepEvent
     data class ToolRejected(val toolName: String, val toolCallId: String, val reason: String) : AgentStepEvent

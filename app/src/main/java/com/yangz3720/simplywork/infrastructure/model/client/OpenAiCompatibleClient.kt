@@ -139,7 +139,7 @@ class OpenAiCompatibleClient(
             handleHttpError(response.status.value, responseBody)
         }
 
-        val data = json.parseToJsonElement(responseBody).jsonObject["data"]?.jsonArray
+        val data = (json.parseToJsonElement(responseBody) as? JsonObject)?.get("data") as? JsonArray
         data.orEmpty()
             .mapNotNull { entry ->
                 val obj = entry as? JsonObject ?: return@mapNotNull null
@@ -334,21 +334,22 @@ class OpenAiCompatibleClient(
                         chunkJson["id"]?.jsonPrimitive?.contentOrNull?.let { responseId = it }
                         chunkJson["model"]?.jsonPrimitive?.contentOrNull?.let { responseModel = it }
 
-                        // Parse usage if present in stream
-                        chunkJson["usage"]?.jsonObject?.let { usageObj ->
+                        // Parse usage if present in stream. `as?` (not `?.jsonObject`): a key present
+                        // with a JSON null is JsonNull, which the safe-call does NOT skip.
+                        (chunkJson["usage"] as? JsonObject)?.let { usageObj ->
                             val usage = parseUsage(usageObj)
                             tokenUsage = usage
                             emit(ModelStreamChunk.UsageUpdate(usage))
                         }
 
-                        val choices = chunkJson["choices"]?.jsonArray ?: continue
+                        val choices = chunkJson["choices"] as? JsonArray ?: continue
                         for (choice in choices) {
-                            val choiceObj = choice.jsonObject
+                            val choiceObj = choice as? JsonObject ?: continue
                             choiceObj["finish_reason"]?.jsonPrimitive?.contentOrNull?.let {
                                 finishReason = parseFinishReason(it)
                             }
 
-                            val delta = choiceObj["delta"]?.jsonObject ?: continue
+                            val delta = choiceObj["delta"] as? JsonObject ?: continue
 
                             // 1. Text Delta
                             delta["content"]?.jsonPrimitive?.contentOrNull?.let { textDelta ->
@@ -369,13 +370,13 @@ class OpenAiCompatibleClient(
                             }
 
                             // 3. Tool Calls Delta
-                            val toolCallsArray = delta["tool_calls"]?.jsonArray
+                            val toolCallsArray = delta["tool_calls"] as? JsonArray
                             if (toolCallsArray != null) {
                                 for (tc in toolCallsArray) {
-                                    val tcObj = tc.jsonObject
+                                    val tcObj = tc as? JsonObject ?: continue
                                     val index = tcObj["index"]?.jsonPrimitive?.intOrNull ?: 0
                                     val id = tcObj["id"]?.jsonPrimitive?.contentOrNull
-                                    val fnObj = tcObj["function"]?.jsonObject
+                                    val fnObj = tcObj["function"] as? JsonObject
                                     val name = fnObj?.get("name")?.jsonPrimitive?.contentOrNull
                                     val argsDelta = fnObj?.get("arguments")?.jsonPrimitive?.contentOrNull.orEmpty()
 
@@ -579,14 +580,14 @@ class OpenAiCompatibleClient(
         val id = json["id"]?.jsonPrimitive?.contentOrNull ?: "chatcmpl-${System.currentTimeMillis()}"
         val model = json["model"]?.jsonPrimitive?.contentOrNull ?: config.defaultModel
 
-        val choices = json["choices"]?.jsonArray ?: emptyList()
-        val firstChoice = choices.firstOrNull()?.jsonObject
+        val choices = json["choices"] as? JsonArray ?: emptyList()
+        val firstChoice = choices.firstOrNull() as? JsonObject
             ?: throw InfrastructureException.Model.InvalidResponse("Empty choices array in model response")
 
         val rawFinishReason = firstChoice["finish_reason"]?.jsonPrimitive?.contentOrNull
         var finishReason = parseFinishReason(rawFinishReason)
 
-        val messageObj = firstChoice["message"]?.jsonObject
+        val messageObj = firstChoice["message"] as? JsonObject
             ?: throw InfrastructureException.Model.InvalidResponse("Missing message in model response choice")
 
         val content = messageObj["content"]?.jsonPrimitive?.contentOrNull
@@ -594,10 +595,10 @@ class OpenAiCompatibleClient(
             ?: messageObj["reasoning"]?.jsonPrimitive?.contentOrNull
 
         val toolCalls = mutableListOf<ToolCall>()
-        messageObj["tool_calls"]?.jsonArray?.forEach { tcElement ->
-            val tcObj = tcElement.jsonObject
+        (messageObj["tool_calls"] as? JsonArray)?.forEach { tcElement ->
+            val tcObj = tcElement as? JsonObject ?: return@forEach
             val tcId = tcObj["id"]?.jsonPrimitive?.contentOrNull ?: "call_${System.currentTimeMillis()}"
-            val fnObj = tcObj["function"]?.jsonObject
+            val fnObj = tcObj["function"] as? JsonObject
             val fnName = fnObj?.get("name")?.jsonPrimitive?.contentOrNull.orEmpty()
             val fnArgs = fnObj?.get("arguments")?.jsonPrimitive?.contentOrNull ?: "{}"
             toolCalls.add(ToolCall(id = tcId, name = fnName, argumentsJson = fnArgs))
@@ -607,7 +608,7 @@ class OpenAiCompatibleClient(
             finishReason = FinishReason.TOOL_CALLS
         }
 
-        val tokenUsage = parseUsage(json["usage"]?.jsonObject)
+        val tokenUsage = parseUsage(json["usage"] as? JsonObject)
 
         return ModelResponse(
             id = id,

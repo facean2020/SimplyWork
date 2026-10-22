@@ -67,14 +67,17 @@ fun ConversationList(
     onEditUser: (UiMessage) -> Unit = {},
     onSwitchBranch: (UiMessage, Int) -> Unit = { _, _ -> },
     /** Resolves an image blob id to raw bytes for attachment thumbnails (null = no store wired). */
-    loadImageBytes: (String) -> ByteArray? = { null }
+    loadImageBytes: (String) -> ByteArray? = { null },
+    /** In-flight assistant text (streaming). Rendered as a live markdown item at the tail of the list. */
+    streamingText: String? = null
 ) {
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
     val expanded = remember { mutableStateMapOf<String, Boolean>() }
 
-    // Stick to the bottom and scroll when new content arrives.
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
+    // Stick to the bottom and scroll when new content arrives (including streaming growth).
+    val tailCount = messages.size + (if (streamingText != null) 1 else 0)
+    LaunchedEffect(tailCount) {
+        if (tailCount > 0) listState.animateScrollToItem(tailCount - 1)
     }
 
     LazyColumn(
@@ -96,7 +99,64 @@ fun ConversationList(
                 loadImageBytes = loadImageBytes
             )
         }
+        if (streamingText != null) {
+            item(key = "streaming") {
+                StreamingAssistantText(text = streamingText)
+            }
+        }
     }
+}
+
+/**
+ * Live assistant text while a model turn is still streaming: same typography pipeline as the
+ * finished [AssistantText], fed with the partial markdown so far. A soft cursor marks the tail.
+ */
+@Composable
+private fun StreamingAssistantText(text: String) {
+    val body = MaterialTheme.typography.bodyLarge
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 2.dp, vertical = 2.dp)
+    ) {
+        Markdown(
+            content = text,
+            colors = markdownColor(text = MaterialTheme.colorScheme.onBackground),
+            typography = markdownTypography(
+                text = body,
+                paragraph = body,
+                h1 = chatHeading(body, 24.sp),
+                h2 = chatHeading(body, 20.sp),
+                h3 = chatHeading(body, 18.sp),
+                h4 = chatHeading(body, 16.sp),
+                h5 = chatHeading(body, 15.sp),
+                h6 = chatHeading(body, 14.sp)
+            ),
+            modifier = Modifier.fillMaxWidth()
+        )
+        // Blinking tail cursor: cheap proof that the turn is still live (text may end on a partial token).
+        StreamingCursor()
+    }
+}
+
+@Composable
+private fun StreamingCursor() {
+    var visible by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(530)
+            visible = !visible
+        }
+    }
+    Box(
+        modifier = Modifier
+            .padding(start = 2.dp, top = 2.dp)
+            .size(width = 8.dp, height = 16.dp)
+            .background(
+                color = MaterialTheme.colorScheme.primary.copy(alpha = if (visible) 0.85f else 0.15f),
+                shape = RoundedCornerShape(1.dp)
+            )
+    )
 }
 
 @Composable

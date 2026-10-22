@@ -13,6 +13,7 @@ import com.yangz3720.simplywork.infrastructure.model.ModelProvider
 import com.yangz3720.simplywork.infrastructure.model.model.Attachment
 import com.yangz3720.simplywork.infrastructure.model.model.Message
 import com.yangz3720.simplywork.infrastructure.model.model.ModelResponse
+import com.yangz3720.simplywork.infrastructure.model.model.ModelStreamChunk
 import com.yangz3720.simplywork.infrastructure.model.model.ToolCall
 import com.yangz3720.simplywork.infrastructure.util.AgentLogger
 import kotlinx.coroutines.CancellationException
@@ -295,22 +296,48 @@ class AgentLoopCoordinator(
         return anyDenied
     }
 
+    /**
+     * One model turn over SSE streaming: deltas surface to the UI as [AgentStepEvent.AssistantTextDelta]
+     * for progressive markdown rendering; the assembled [ModelResponse] is returned for persistence.
+     * Failures/timeouts land in the same [AgentStepEvent.Failed] shape as the old non-streaming path.
+     */
     private suspend fun kotlinx.coroutines.flow.FlowCollector<AgentStepEvent>.callModel(
         sessionId: String,
         iteration: Int,
         request: com.yangz3720.simplywork.infrastructure.model.model.ModelRequest
     ): ModelResponse? {
-        val result = try {
-            withTimeout(config.llmTimeoutMs) { modelProvider.generate(request) }
+        var assembled: ModelResponse? = null
+        var failure: Throwable? = null
+        try {
+            withTimeout(config.llmTimeoutMs) {
+                modelProvider.generateStream(request).collect { chunk ->
+                    when (chunk) {
+                        is ModelStreamChunk.TextDelta ->
+                            emit(AgentStepEvent.AssistantTextDelta(sessionId, iteration, chunk.delta))
+                        is ModelStreamChunk.Completed ->
+                            assembled = chunk.response
+                        is ModelStreamChunk.Error ->
+                            failure = chunk.throwable
+                        // Reasoning / tool-call / usage chunks need no UI surface yet.
+                        else -> Unit
+                    }
+                }
+            }
         } catch (e: TimeoutCancellationException) {
             val timeout = InfrastructureException.Model.NetworkTimeout("LLM turn timed out after ${config.llmTimeoutMs}ms")
             AgentLogger.e(TAG, timeout) { "Iteration $iteration timed out" }
             emit(AgentStepEvent.Failed(sessionId, timeout))
             return null
         }
-        return result.getOrElse { failure ->
-            AgentLogger.e(TAG, failure) { "Model call failed at iteration $iteration" }
-            emit(AgentStepEvent.Failed(sessionId, failure))
+        failure?.let { f ->
+            AgentLogger.e(TAG, f) { "Model call failed at iteration $iteration" }
+            emit(AgentStepEvent.Failed(sessionId, f))
+            return null
+        }
+        return assembled ?: run {
+            val missing = InfrastructureException.Model.InvalidResponse("Stream ended without a Completed chunk")
+            AgentLogger.e(TAG, missing) { "Iteration $iteration produced no response" }
+            emit(AgentStepEvent.Failed(sessionId, missing))
             null
         }
     }

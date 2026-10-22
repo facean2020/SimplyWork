@@ -206,6 +206,52 @@ class ModelProviderTest {
         assertEquals(FinishReason.STOP, completed?.finishReason)
     }
 
+    /**
+     * Regression: SSE chunks often carry explicit JSON nulls (`"usage":null`, `"delta":null`).
+     * `JsonNull` is not Kotlin `null` -- `?.jsonObject` does NOT skip it and used to throw
+     * "Element class JsonNull is not a JsonObject", killing the whole chat turn.
+     */
+    @Test
+    fun testStreamingToleratesJsonNullFields() = runTest {
+        val ssePayload = """
+            data: {"id":"chatcmpl-nulls","model":"gpt-4o","choices":[{"index":0,"delta":null,"finish_reason":null}],"usage":null}
+
+            data: {"id":"chatcmpl-nulls","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}],"usage":null}
+
+            data: {"id":"chatcmpl-nulls","model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":null}
+
+            data: [DONE]
+
+        """.trimIndent()
+
+        val mockEngine = MockEngine { _ ->
+            respond(
+                content = ByteReadChannel(ssePayload),
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/event-stream")
+            )
+        }
+
+        val testHttpClient = HttpClient(mockEngine) {
+            install(ContentNegotiation) {
+                json(json)
+            }
+        }
+
+        val config = ModelConfig(
+            baseUrl = "https://api.example.com",
+            apiKey = "sk-test",
+            defaultModel = "gpt-4o"
+        )
+        val client = OpenAiCompatibleClient(config, testHttpClient)
+
+        val chunks = client.generateStream(ModelRequest(messages = listOf(Message.User("hi")))).toList()
+
+        assertTrue(chunks.any { it is ModelStreamChunk.TextDelta && it.delta == "ok" })
+        val completed = chunks.filterIsInstance<ModelStreamChunk.Completed>().single()
+        assertEquals("ok", completed.response.text)
+    }
+
     @Test
     fun testOpenAiCompatibleClientStreamingWithToolCalls() = runTest {
         val ssePayload = """

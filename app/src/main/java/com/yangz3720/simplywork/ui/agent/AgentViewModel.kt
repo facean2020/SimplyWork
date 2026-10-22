@@ -238,6 +238,7 @@ class AgentViewModel(
     /** ChatGPT-style new chat: clears the current projection; the session is only persisted when the first message is sent (owned by the current project). */
     fun startNewChat() {
         runSupervisor.stop()
+        clearStreaming()
         // copy rather than rebuild: only the session projection is cleared, so provider / project / OneDrive and
         // other orthogonal state all survive (a rebuild-style version would silently drop fields when new ones are added).
         _uiState.update { current ->
@@ -536,6 +537,7 @@ class AgentViewModel(
     fun openSession(sessionId: String) {
         if (_uiState.value.currentSessionId == sessionId) return
         runSupervisor.stop()
+        clearStreaming()
         switchToSession(sessionId)
     }
 
@@ -722,6 +724,7 @@ class AgentViewModel(
     /** Run abort (matching ChatGPT's stop semantics): already-persisted nodes are kept; pending nodes are swept by the next run. */
     fun stopRun() {
         runSupervisor.stop()
+        clearStreaming()
     }
 
     fun respondApproval(allowed: Boolean) {
@@ -888,6 +891,22 @@ class AgentViewModel(
         return true
     }
 
+    /**
+     * Streaming text buffer: deltas arrive much faster than the UI can usefully redraw, so they are
+     * accumulated here and flushed to [AgentUiState.streamingText] at most every [STREAM_FLUSH_MS].
+     * Cleared when the turn lands in the persisted projection (ModelTurn / Completed / Failed).
+     */
+    private val streamingBuffer = StringBuilder()
+    private var lastStreamFlushMs = 0L
+
+    private companion object {
+        /** UI flush cadence while streaming: ~20fps of markdown re-render is enough for "live typing". */
+        const val STREAM_FLUSH_MS = 50L
+
+        /** Also flush when the buffer is large, so a burst of deltas does not stay invisible for a full tick. */
+        const val STREAM_FLUSH_CHARS = 2_000
+    }
+
     private suspend fun onEvent(event: AgentStepEvent) {
         when (event) {
             // The running flag is maintained by the supervisor's state flow (it is already true by the time LoopStarted arrives).
@@ -896,9 +915,20 @@ class AgentViewModel(
             // User messages / steers become visible as soon as they are persisted (no waiting for the next ModelTurn).
             is AgentStepEvent.InboundPersisted -> refreshConversation()
 
+            is AgentStepEvent.AssistantTextDelta -> {
+                streamingBuffer.append(event.delta)
+                val now = System.currentTimeMillis()
+                if (now - lastStreamFlushMs >= STREAM_FLUSH_MS || streamingBuffer.length >= STREAM_FLUSH_CHARS) {
+                    lastStreamFlushMs = now
+                    val snapshot = streamingBuffer.toString()
+                    _uiState.update { it.copy(streamingText = snapshot) }
+                }
+            }
+
             is AgentStepEvent.ModelTurn -> {
                 // promptTokens is exactly the context size actually sent in this turn -- that is what compaction looks at,
                 // so it is surfaced to the settings screen as the "current context usage" directly.
+                clearStreaming()
                 _uiState.update { it.copy(contextPromptTokens = event.promptTokens) }
                 refreshConversation()
             }
@@ -922,6 +952,7 @@ class AgentViewModel(
 
             is AgentStepEvent.Completed -> {
                 // The agent may have changed config during the run: land the pending rebuild (takes effect on the next run).
+                clearStreaming()
                 owner.rebuildRuntimeIfNeeded()
                 refreshSelection()
                 refreshConversation()
@@ -932,6 +963,7 @@ class AgentViewModel(
             }
 
             is AgentStepEvent.Failed -> {
+                clearStreaming()
                 owner.rebuildRuntimeIfNeeded()
                 _uiState.update {
                     it.copy(runError = event.cause.message ?: event.cause::class.simpleName)
@@ -939,6 +971,12 @@ class AgentViewModel(
                 refreshConversation()
             }
         }
+    }
+
+    private fun clearStreaming() {
+        streamingBuffer.setLength(0)
+        lastStreamFlushMs = 0L
+        _uiState.update { it.copy(streamingText = null) }
     }
 
     /** Rebuild the conversation projection from persisted facts (the active path -> UiMessage; the full node set provides branch info). */

@@ -237,7 +237,6 @@ class AgentViewModelTest {
             gate.await()
             return Result.success(final)
         }
-        override fun generateStream(request: ModelRequest) = throw UnsupportedOperationException()
     }
 
     /** Fails on the first call, returns [after] from then on. */
@@ -248,7 +247,6 @@ class AgentViewModelTest {
         override suspend fun generate(request: ModelRequest): Result<ModelResponse> =
             if (first.getAndSet(false)) Result.failure(RuntimeException("rate limited"))
             else Result.success(after)
-        override fun generateStream(request: ModelRequest) = throw UnsupportedOperationException()
     }
 
     /** Suspends forever (stop-semantics test). */
@@ -267,7 +265,6 @@ class AgentViewModelTest {
                 )
             )
         }
-        override fun generateStream(request: ModelRequest) = throw UnsupportedOperationException()
     }
 
     /** Fixed script: returns responses in order. */
@@ -276,7 +273,6 @@ class AgentViewModelTest {
         override val providerId = "scripted"
         override val supportedCapabilities = emptySet<ModelCapability>()
         override suspend fun generate(request: ModelRequest) = Result.success(queue.removeFirst())
-        override fun generateStream(request: ModelRequest) = throw UnsupportedOperationException()
     }
 
     // ----- helpers -----

@@ -286,7 +286,7 @@ fun AgentScreen(
             // behind the keyboard; placed here, it gets compressed along with the content area when the keyboard comes up, so it is always visible.
             Column(modifier = Modifier.padding(innerPadding).fillMaxWidth()) {
                 Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                    if (state.messages.isEmpty()) {
+                    if (state.messages.isEmpty() && state.streamingText == null) {
                         EmptyState(
                             onSuggestion = { draft = it },
                             modifier = Modifier.fillMaxWidth()
@@ -296,7 +296,8 @@ fun AgentScreen(
                             messages = state.messages,
                             onEditUser = startEdit,
                             onSwitchBranch = { message, direction -> viewModel.switchBranch(message.id, direction) },
-                            loadImageBytes = { viewModel.loadImageBytes(it) }
+                            loadImageBytes = { viewModel.loadImageBytes(it) },
+                            streamingText = state.streamingText
                         )
                     }
                 }

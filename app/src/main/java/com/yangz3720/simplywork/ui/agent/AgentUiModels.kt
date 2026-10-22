@@ -184,6 +184,13 @@ data class AgentUiState(
      */
     val contextPromptTokens: Int = 0,
 
+    /**
+     * Streaming assistant text in flight (null = no active model turn).
+     * Assembled from [com.yangz3720.simplywork.core.agent.AgentStepEvent.AssistantTextDelta] and cleared
+     * when the turn lands in the persisted projection ([AgentStepEvent.ModelTurn] / Completed / Failed).
+     */
+    val streamingText: String? = null,
+
     val modelConfigured: Boolean = true
 )
 
