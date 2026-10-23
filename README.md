@@ -134,6 +134,15 @@ RELEASE_KEY_PASSWORD=...
 
 未配置签名时 release 会明确产出 `app-release-unsigned.apk`，不会用空密码签出“看起来正常”的坏包。
 
+### 发布新版本
+
+维护者发版用一键脚本，自动完成「前置检查 → 单元测试 → 编译 → 验签 → 打 tag → 创建 GitHub Release 并上传 APK」：
+
+```bash
+scripts/release.sh --dry-run   # 只做检查并打印发版计划
+scripts/release.sh             # 正式发版（版本号取自 build.gradle.kts）
+```
+
 ## 协议
 
 本项目基于 [Apache License 2.0](LICENSE) 开源 —— 可自由使用、修改、分发（含商用），需保留版权与许可声明。
@@ -234,6 +243,15 @@ RELEASE_KEY_PASSWORD=...
 ```
 
 Without those credentials the release task emits an explicitly named `app-release-unsigned.apk` instead of signing with empty passwords.
+
+### Releasing
+
+Maintainers ship with a single script that runs checks → unit tests → build → signature verification → tag → GitHub Release with the APK attached:
+
+```bash
+scripts/release.sh --dry-run   # checks and plan only
+scripts/release.sh             # full release (version read from build.gradle.kts)
+```
 
 ## License
 
